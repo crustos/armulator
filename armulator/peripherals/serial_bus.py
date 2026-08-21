@@ -164,8 +164,11 @@ class Bcm2835Spi(MMIODevice):
         if offset == SPI_CS:
             if value & CS_CLEAR_RX:
                 self._rx.clear()
+            was_active = self.transfer_active
+            previous_cs = self.chip_select
             # The clear bits are write-only strobes, not state.
             self._cs = value & ~(CS_CLEAR_TX | CS_CLEAR_RX)
+            self._update_chip_select(was_active, previous_cs)
             self._update_interrupt()
         elif offset == SPI_FIFO:
             self._exchange(value & 0xFF)
@@ -173,6 +176,26 @@ class Bcm2835Spi(MMIODevice):
             self._clk = value & 0xFFFF
         elif offset == SPI_DLEN:
             self._dlen = value & 0xFFFF
+
+    def _update_chip_select(self, was_active, previous_cs):
+        """
+        Notify slaves when chip select asserts or deasserts.
+
+        Slaves that model framing (the BCM2835 SPI slave delimits its
+        dialogues this way) implement ``select`` / ``deselect``; slaves that
+        do not simply lack the methods and are unaffected.
+        """
+        now_active = self.transfer_active
+        if was_active and (not now_active or previous_cs != self.chip_select):
+            self._notify(previous_cs, 'deselect')
+        if now_active and (not was_active or previous_cs != self.chip_select):
+            self._notify(self.chip_select, 'select')
+
+    def _notify(self, chip_select, method):
+        slave = self.slaves.get(chip_select)
+        hook = getattr(slave, method, None)
+        if hook is not None:
+            hook()
 
 
 # ----------------------------------------------------------------------
