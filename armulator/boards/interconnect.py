@@ -72,46 +72,66 @@ class GpioLink:
 
 class SpiBridge:
     """
-    Presents one board's peripheral as an SPI slave to another board.
+    Wires one board's SPI master to another board's SPI slave controller.
 
-    The Pi's SPI controller is the master; every byte it shifts out is
-    delivered to ``slave_board``'s SPI controller receive path, and the
-    byte the slave has queued comes back on the same transfer.  This models
-    the common arrangement of a Pi talking to a coprocessor over SPI.
+    Both sides are real peripheral models: the master's FIFO writes drive
+    the slave's :meth:`~armulator.peripherals.spi_slave.Bcm2835SpiSlave.transfer`,
+    and chip-select framing propagates so the slave sees proper dialogue
+    boundaries.  Nothing reaches into either controller's internals.
 
-    :param master: board whose SPI controller drives the bus
-    :param slave_board: board acting as the slave
+    :param master: board whose SPI master drives the bus
+    :param slave_board: board acting as slave; needs a ``spi_slave`` device
     :param chip_select: which CS line on the master selects this slave
+
+    Because the BCM2835 slave block is half duplex and expects an
+    address/direction octet first, the master's firmware must open each
+    dialogue with :func:`~armulator.peripherals.spi_slave.address_octet`.
+    A master that just shifts raw data will be ignored by the slave -- which
+    is exactly what real hardware does, and worth reproducing.
     """
 
     def __init__(self, master, slave_board, chip_select=0, name='spi_bridge'):
+        slave = getattr(slave_board, 'spi_slave', None)
+        if slave is None:
+            raise ValueError(
+                f'{type(slave_board).__name__} has no spi_slave controller; '
+                'only boards with a modelled SPI slave can be bridged to'
+            )
         self.master = master
         self.slave_board = slave_board
+        self.slave = slave
         self.chip_select = chip_select
         self.name = name
         #: (master_byte, slave_byte) for every exchange.
         self.exchanges = []
         master.spi.attach_slave(self, chip_select)
 
+    # The bridge sits between the two controllers so it can record traffic,
+    # forwarding every part of the slave contract through to the real model.
     def transfer(self, byte: int) -> int:
-        """
-        Called by the master's SPI controller for each byte.
-
-        The slave board's response comes from bytes its firmware has
-        queued into the slave controller's FIFO.
-        """
-        slave_spi = self.slave_board.spi
-        response = slave_spi._rx.pop(0) if slave_spi._rx else 0x00
-        # Deliver the master's byte where slave firmware will read it.
-        slave_spi._rx.append(byte & 0xFF)
-        self.exchanges.append((byte & 0xFF, response))
+        response = self.slave.transfer(byte)
+        self.exchanges.append((byte & 0xFF, response & 0xFF))
         return response
 
+    def select(self) -> None:
+        self.slave.select()
+
+    def deselect(self) -> None:
+        self.slave.deselect()
+
     def queue_slave_response(self, data) -> None:
-        """Pre-load bytes for the slave to return on the next transfers."""
-        self.slave_board.spi._rx.extend(
-            data if isinstance(data, (bytes, bytearray)) else bytes(data)
-        )
+        """Load bytes into the slave's TX FIFO for a read dialogue."""
+        self.slave.queue_transmit(data)
+
+    @property
+    def mosi(self) -> bytes:
+        """Everything the master shifted out, including address octets."""
+        return bytes(m for m, _ in self.exchanges)
+
+    @property
+    def miso(self) -> bytes:
+        """Everything the slave drove back."""
+        return bytes(s for _, s in self.exchanges)
 
     def settle(self, step=0) -> None:
         """No continuous state to settle; transfers are event driven."""
