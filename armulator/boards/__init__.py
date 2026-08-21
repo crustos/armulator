@@ -30,6 +30,7 @@ from armulator.peripherals.gic400 import SPI_BASE, Gic400
 from armulator.peripherals.gpio_tegra import TegraGpio
 from armulator.peripherals.serial_bus import Bcm2835I2c, Bcm2835Spi
 from armulator.peripherals.spi_slave import Bcm2835SpiSlave
+from armulator.peripherals.spi_tegra import Tegra210Spi
 from armulator.peripherals.uart_pl011 import BcmSystemTimer, Pl011Uart
 
 
@@ -296,12 +297,11 @@ class JetsonNano(Board):
     def _build(self):
         self.attach('gpio', TegraGpio(name='tegra_gpio'), address=self.GPIO_ADDRESS)
         self.attach('uart', Pl011Uart(name='uarta'), address=self.UARTA_ADDRESS)
-        # NOTE: Tegra's SPI controller has its own register map; this is a
-        # Broadcom model standing in so the bus is drivable.  Firmware that
-        # targets the real Tegra SPI register layout will not work against
-        # it.  The Jetson has no modelled SPI slave, so cross-device SPI
-        # should use a Pi as the slave end.  See JETSON.md.
-        self.attach('spi', Bcm2835Spi(name='spi1'), address=self.SPI_ADDRESS)
+        # SPI1 at 0x7000d400, the controller the Jetson's 40-pin header
+        # exposes.  Register map follows the in-tree tegra114 driver, which
+        # covers T210.  The Jetson still has no modelled SPI *slave*, so
+        # cross-device SPI should use a Pi as the slave end.  See JETSON.md.
+        self.attach('spi', Tegra210Spi(name='spi1'), address=self.SPI_ADDRESS)
 
         self.gic = self.attach('gic', Gic400(name='gic500'),
                                address=self.GIC_ADDRESS)
