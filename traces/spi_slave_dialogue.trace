@@ -1,0 +1,5 @@
+# spi_slave_dialogue
+# source: recorded from armulator model (NOT hardware)
+r 32 0x3f214010 0x9 FR
+r 32 0x3f21401c 0x2 RIS
+r 32 0x3f214008 0x2a SLV

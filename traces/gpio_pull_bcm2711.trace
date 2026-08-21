@@ -1,0 +1,4 @@
+# gpio_pull_bcm2711
+# source: recorded from armulator model (NOT hardware)
+w 32 0xfe2000e4 0x100 GPIO_PUP_PDN_CNTRL_REG0
+r 32 0xfe2000e4 0x100 GPIO_PUP_PDN_CNTRL_REG0

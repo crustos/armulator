@@ -1,0 +1,8 @@
+# uart_hello
+# source: recorded from armulator model (NOT hardware)
+w 32 0xfe201024 0x1a IBRD
+w 32 0xfe201028 0x3 FBRD
+w 32 0xfe20102c 0x70 LCRH
+w 32 0xfe201000 0x48 DR
+r 32 0xfe201018 0x90 FR
+w 32 0xfe201000 0x49 DR

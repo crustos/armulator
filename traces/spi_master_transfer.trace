@@ -1,0 +1,8 @@
+# spi_master_transfer
+# source: recorded from armulator model (NOT hardware)
+w 32 0xfe204008 0xfa CLK
+w 32 0xfe204000 0x80 CS
+w 32 0xfe204004 0x54 FIFO
+w 32 0xfe204004 0x42 FIFO
+r 32 0xfe204000 0xe0080 CS
+w 32 0xfe204000 0x0 CS
