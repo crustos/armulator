@@ -241,7 +241,21 @@ class TestFirmwareIntegration:
         assert board.timer.counter >= 20
 
     def test_gpio_interrupt_reaches_cpu(self):
+        # The Pi 4 routes device interrupts through its GIC-400, so the
+        # distributor and CPU interface must be enabled and the interrupt
+        # unmasked before a GPIO edge can reach the core -- exactly as on
+        # real BCM2711 silicon.  See test_gic400.py for the full handshake.
+        from armulator.peripherals.gic400 import (
+            GICC_CTLR, GICC_PMR, GICD_CTLR, GICD_ISENABLER, SPI_BASE,
+        )
         board = RaspberryPi4()
+        intid = SPI_BASE + RaspberryPi4.GPIO_SPI
+        board.gic.write_register(GICD_CTLR, 1)
+        board.gic.write_register(GICC_CTLR, 1)
+        board.gic.write_register(GICC_PMR, 0xFF)
+        board.gic.write_register(
+            GICD_ISENABLER + 4 * (intid // 32), 1 << (intid % 32)
+        )
         board.gpio.write_register(0x4C, 1 << 7)     # GPREN0 pin 7
         board.cpu.registers.cpsr.i = 0              # unmask IRQs
         board.start()
@@ -249,6 +263,17 @@ class TestFirmwareIntegration:
         assert board.pending_irq() == ['gpio']
         assert board.service_interrupts() is True
         assert board.cpu.registers.cpsr.m == 0b10010   # IRQ mode
+
+    def test_gpio_interrupt_blocked_by_disabled_gic(self):
+        # The same edge, with the GIC left at its reset state, must not
+        # reach the CPU.
+        board = RaspberryPi4()
+        board.gpio.write_register(0x4C, 1 << 7)
+        board.cpu.registers.cpsr.i = 0
+        board.start()
+        board.gpio.drive_input(7, True)
+        assert board.pending_irq() == ['gpio']       # device is asserting
+        assert board.service_interrupts() is False   # but the GIC gates it
 
     def test_masked_irq_is_not_delivered(self):
         board = RaspberryPi4()
