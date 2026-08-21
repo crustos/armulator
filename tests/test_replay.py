@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from armulator.boards import RaspberryPi3, RaspberryPi4
+from armulator.boards import JetsonNano, RaspberryPi3, RaspberryPi4
 from armulator.harness import (
     Access, Trace, TraceRecorder, load, parse_canonical, parse_ftrace, replay,
     replay_on_board,
@@ -279,6 +279,7 @@ class TestBaselineTraces:
         'i2c_write': ('i2c', 0xFE804000, RaspberryPi4, set(), '_attach_i2c_slave'),
         'spi_slave_dialogue': ('spi_slave', 0x3F214000, RaspberryPi3, set(),
                                '_enable_spi_slave'),
+        'tegra_spi_transfer': ('spi', 0x7000D400, JetsonNano, set(), None),
     }
 
     @pytest.mark.parametrize('name', sorted(BASELINES))
