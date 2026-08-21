@@ -29,6 +29,7 @@ from armulator.peripherals.gpio_bcm import BcmGpio
 from armulator.peripherals.gic400 import SPI_BASE, Gic400
 from armulator.peripherals.gpio_tegra import TegraGpio
 from armulator.peripherals.serial_bus import Bcm2835I2c, Bcm2835Spi
+from armulator.peripherals.spi_slave import Bcm2835SpiSlave
 from armulator.peripherals.uart_pl011 import BcmSystemTimer, Pl011Uart
 
 
@@ -208,6 +209,7 @@ class RaspberryPi3(Board):
     SYSTIMER_OFFSET = 0x003000
     SPI0_OFFSET = 0x204000
     I2C1_OFFSET = 0x804000
+    SPI_SLAVE_OFFSET = 0x214000
 
     def _build(self):
         self.attach('gpio', BcmGpio(pull_style='legacy', name='gpio'),
@@ -217,6 +219,8 @@ class RaspberryPi3(Board):
                     offset=self.SYSTIMER_OFFSET)
         self.attach('spi', Bcm2835Spi(name='spi0'), offset=self.SPI0_OFFSET)
         self.attach('i2c', Bcm2835I2c(name='i2c1'), offset=self.I2C1_OFFSET)
+        self.attach('spi_slave', Bcm2835SpiSlave(name='spi_slave'),
+                    offset=self.SPI_SLAVE_OFFSET)
 
 
 class RaspberryPi4(Board):
@@ -235,6 +239,7 @@ class RaspberryPi4(Board):
     SYSTIMER_OFFSET = 0x003000
     SPI0_OFFSET = 0x204000
     I2C1_OFFSET = 0x804000
+    SPI_SLAVE_OFFSET = 0x214000
 
     #: The BCM2711's GIC-400 sits outside the legacy peripheral window.
     GIC_ADDRESS = 0xFF840000
@@ -253,6 +258,8 @@ class RaspberryPi4(Board):
                     offset=self.SYSTIMER_OFFSET)
         self.attach('spi', Bcm2835Spi(name='spi0'), offset=self.SPI0_OFFSET)
         self.attach('i2c', Bcm2835I2c(name='i2c1'), offset=self.I2C1_OFFSET)
+        self.attach('spi_slave', Bcm2835SpiSlave(name='spi_slave'),
+                    offset=self.SPI_SLAVE_OFFSET)
 
         self.gic = self.attach('gic', Gic400(name='gic400'),
                                address=self.GIC_ADDRESS)
@@ -289,6 +296,11 @@ class JetsonNano(Board):
     def _build(self):
         self.attach('gpio', TegraGpio(name='tegra_gpio'), address=self.GPIO_ADDRESS)
         self.attach('uart', Pl011Uart(name='uarta'), address=self.UARTA_ADDRESS)
+        # NOTE: Tegra's SPI controller has its own register map; this is a
+        # Broadcom model standing in so the bus is drivable.  Firmware that
+        # targets the real Tegra SPI register layout will not work against
+        # it.  The Jetson has no modelled SPI slave, so cross-device SPI
+        # should use a Pi as the slave end.  See JETSON.md.
         self.attach('spi', Bcm2835Spi(name='spi1'), address=self.SPI_ADDRESS)
 
         self.gic = self.attach('gic', Gic400(name='gic500'),
