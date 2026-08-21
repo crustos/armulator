@@ -289,7 +289,8 @@ not hardware validation. Regenerate with `python3 tools/record_baselines.py`.
   pull up/down trap, GIC-400 acknowledge/EOI semantics, the SPI slave
   dialogue protocol and its errata, and the hardware capture recipe.
 - **[JETSON.md](JETSON.md)** — Tegra GPIO structure and masked registers,
-  plus an explicit list of what is a stand-in and what is missing.
+  the Tegra SPI controller's triggered-transfer model and its two
+  off-by-one register traps, plus an explicit list of what is missing.
 
 # Running the tests
 

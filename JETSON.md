@@ -37,7 +37,7 @@ GPU, this project has nothing for you.
 |---|---|---|---|
 | Tegra GPIO | `board.gpio` | `0x6000D000` | **Real model** |
 | UART A | `board.uart` | `0x70006000` | PL011 model, close enough |
-| SPI | `board.spi` | `0x7000D400` | ⚠️ **Broadcom stand-in** |
+| SPI1 | `board.spi` | `0x7000D400` | **Real model** |
 | GIC-500 | `board.gic` | `0x50041000` | GICv2-compatible |
 
 ```python
@@ -133,17 +133,82 @@ board.gpio.is_output('PA0')    # needs both CNF and OE
 
 ---
 
+## SPI1 — Tegra X1 controller
+
+`board.spi` models the Tegra SPI block at `0x7000D400`, the controller the
+Jetson's 40-pin header exposes. The register map and bit definitions follow
+the in-tree drivers (U-Boot `drivers/spi/tegra114_spi.c` and Linux
+`drivers/spi/spi-tegra114.c`), which cover T114/T124/T210/T186 with the same
+block. Those are a better source than the datasheet here, since the Tegra X1
+TRM is available only to registered developers.
+
+### Register map
+
+| Offset | Register | Purpose |
+|---|---|---|
+| `0x000` | `COMMAND1` | word length, master/slave, TX/RX enable, CS, start |
+| `0x004` | `COMMAND2` | tap delays |
+| `0x008`, `0x00C` | `CS_TIM1`, `CS_TIM2` | chip select timing |
+| `0x010` | `TRANS_STATUS` | block count, `RDY` |
+| `0x014` | `FIFO_STATUS` | FIFO flags, counts, error bits, flush |
+| `0x018`, `0x01C` | `TX_DATA`, `RX_DATA` | single-word ports |
+| `0x020`, `0x024` | `DMA_CTL`, `DMA_BLK` | block count minus one |
+| `0x108` | `TX_FIFO` | transmit FIFO port |
+| `0x188` | `RX_FIFO` | receive FIFO port |
+
+### Transfers are triggered, not implied
+
+This is the biggest behavioural difference from Broadcom, and the thing that
+breaks ported firmware. On the BCM2835 controller a FIFO write shifts a byte
+immediately. On Tegra, nothing touches the bus until `COMMAND1.PIO` (bit 31)
+is set:
+
+```python
+from armulator.peripherals.spi_tegra import (
+    CMD1_M_S, CMD1_PIO, CMD1_RX_EN, CMD1_TX_EN,
+    SPI_COMMAND1, SPI_DMA_BLK, SPI_RX_FIFO, SPI_TX_FIFO,
+)
+
+cmd = CMD1_M_S | CMD1_TX_EN | CMD1_RX_EN | 7    # master, 8-bit words
+spi.write_register(SPI_COMMAND1, cmd)
+spi.write_register(SPI_TX_FIFO, 0x42)
+spi.write_register(SPI_DMA_BLK, 0)              # one packet (count - 1)
+spi.write_register(SPI_COMMAND1, cmd | CMD1_PIO)   # go
+```
+
+A driver ported from a Pi fills the TX FIFO and then waits forever. The
+model reproduces that rather than papering over it —
+`test_broadcom_firmware_does_not_work_on_tegra` asserts it explicitly.
+
+### Two more off-by-one traps
+
+Both registers store **one less** than the value you want:
+
+- `COMMAND1.BIT_LENGTH` holds bits minus one — an 8-bit word is `7`
+- `DMA_BLK` holds packet count minus one — one packet is `0`
+
+### Chip select framing
+
+A `PIO` trigger asserts chip select for the duration of the transfer and
+releases it afterwards (unless `CS_SW_HW` holds it), so slaves that frame
+their protocol on CS see one dialogue per trigger. That is what lets a Tegra
+master drive a Pi's SPI slave block correctly:
+
+```python
+nano, pi = JetsonNano(), RaspberryPi3()
+SpiBridge(nano, pi)         # Tegra master -> BCM2835 slave
+```
+
+### Modelled but simplified
+
+- Only whole-byte word lengths move data; `bit_length` records what was
+  programmed, but sub-byte and >8-bit words are truncated to bytes
+- Slave mode (`COMMAND1.M_S` clear) is not modelled — a transfer simply does
+  not happen, rather than the controller pretending to be a master
+- DMA (`DMA_CTL`) is stored but does nothing; transfers are PIO only
+- Packed mode (`COMMAND1.PACKED`) is accepted and ignored
+
 ## Gaps you need to know about
-
-### SPI is a Broadcom stand-in ⚠️
-
-`board.spi` is a `Bcm2835Spi` instance, **not** a Tegra SPI controller. The
-Tegra X1's SPI block has an entirely different register map. This exists so
-the bus is drivable in multi-board examples; firmware written against the
-real Tegra SPI layout will not work against it, and a passing test proves
-nothing about Tegra SPI.
-
-This is the largest single piece of unfinished work in the Jetson support.
 
 ### There is no Tegra SPI slave
 
@@ -222,8 +287,9 @@ Two Jetson-specific notes:
 - Tegra register offsets in a capture need rebasing onto `0x6000D000`, and
   the controller stride means a capture spanning several controllers should
   use a `span` covering all of them rather than a single `0x100`.
-- **A replay against `board.spi` proves nothing**, because that device is a
-  Broadcom model. Only `board.gpio` replays are meaningful today.
+- `board.spi` replays are now meaningful — the register map follows the
+  in-tree `tegra114` driver. A capture from `spi-tegra114` on a Nano
+  would validate it.
 
 A real `gpio-tegra` capture from a Nano would be the single most valuable
 contribution to this file — it would validate the one part of the Jetson
