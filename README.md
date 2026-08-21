@@ -73,6 +73,77 @@ arm.emulate_cycle()
 ```
 
 
+# Board and peripheral emulation
+
+For testing GPIO and peripheral driver logic, `armulator.boards` provides
+prebuilt machines with peripherals mapped at the real SoC addresses:
+
+```python
+from armulator.boards import RaspberryPi4
+from armulator.boards.firmware import firmware
+
+board = RaspberryPi4(trace=True)
+board.load(board.CODE_BASE, firmware("""
+    ldr r0, =0xFE200000
+    mov r1, #1
+    lsl r1, r1, #21        @ FSEL17 = output
+    str r1, [r0, #0x04]    @ GPFSEL1
+    mov r2, #1
+    lsl r2, r2, #17
+    str r2, [r0, #0x1C]    @ GPSET0
+""", address=board.CODE_BASE))
+board.start()
+board.run()
+
+assert board.gpio.level(17) is True
+print(board.format_trace())     # gpio.GPFSEL1 <- 0x00200000 ...
+```
+
+Available boards: `RaspberryPi3` (BCM2837, peripherals at `0x3F000000`),
+`RaspberryPi4` (BCM2711, `0xFE000000`) and `JetsonNano` (Tegra X1, GPIO at
+`0x6000D000`).
+
+Peripherals expose a pin-level API so tests can act as the outside world:
+
+```python
+board.gpio.drive_input(7, True)   # external device pulls pin 7 high
+board.gpio.level(7)               # effective level
+board.gpio.function(7)            # GpioFunction.INPUT / OUTPUT / ALT0 ...
+board.gpio.pull(7)                # Pull.UP / DOWN / OFF
+board.gpio.transitions(17)        # recorded output waveform
+board.pending_irq()               # devices asserting their IRQ line
+```
+
+Writing peripherals of your own means subclassing `MMIODevice` and
+implementing two methods:
+
+```python
+from armulator.peripherals import MMIODevice
+
+class MyDevice(MMIODevice):
+    REGISTERS = {0x00: 'CTRL', 0x04: 'STATUS'}
+
+    def read_register(self, offset): ...
+    def write_register(self, offset, value): ...
+
+board.attach('mydev', MyDevice(0x1000), offset=0x100000)
+```
+
+Assembling test firmware from source requires `keystone-engine`
+(`pip install keystone-engine`); pre-assembled bytes work without it.
+
+See `example/gpio_driver_test.py` for a worked walkthrough.
+
+## Scope
+
+The CPU core is **ARMv6** (A32/T32, integer only). The Pi 3, Pi 4 and Jetson
+Nano all ship ARMv8-A cores, so these boards do **not** run AArch64 binaries
+or stock vendor kernels — the peripheral *register interfaces* are what is
+modelled, since that is where GPIO driver logic lives. Write test firmware as
+32-bit ARM (`-marm -march=armv6`) and it exercises the same register
+sequences your production driver performs. For booting real OS images, use
+QEMU's `raspi3b` / `raspi4b` machines instead.
+
 # Running the tests
 
 Running the tests can be done easily with pytest:
