@@ -173,6 +173,43 @@ board.spi.attach_slave(SpiSlaveDevice(responses=b'\x99'), chip_select=0)
 I2C models the NACK path — addressing a slave that isn't on the bus sets ERR
 in the status register.
 
+## SPI slave mode
+
+`Bcm2835SpiSlave` models the Pi's SPI/BSC slave block (`board.spi_slave`),
+and it is deliberately faithful to a peripheral that behaves nothing like a
+conventional SPI slave:
+
+* transfers are **half duplex** octet "dialogues", not simultaneous
+  shift-in/shift-out
+* each dialogue opens with an **address/direction octet** — upper 7 bits are
+  the slave address, LSB 0 selects write and LSB 1 selects read
+* during a write dialogue MISO idles high and the TX FIFO is untouched
+
+```python
+from armulator.peripherals.spi_slave import CR_EN, CR_RXE, CR_SPI, CR_TXE, address_octet
+
+slave.spi_slave.write_register(0x08, 0x2A)                        # SLV
+slave.spi_slave.write_register(0x0C, CR_EN | CR_SPI | CR_RXE | CR_TXE)
+
+master.spi.write_register(0x00, 0x80)                             # CS: TA=1
+master.spi.write_register(0x04, address_octet(0x2A, read=False))  # header
+master.spi.write_register(0x04, 0x42)                             # payload
+master.spi.write_register(0x00, 0x00)                             # CS: TA=0
+
+assert slave.spi_slave.received == b'\x42'
+```
+
+Several hardware errata are modelled, since they are what catch driver
+authors out: `CR.BRK` does not actually clear the FIFOs (set
+`brk_clears_fifos=True` to get the behaviour the datasheet *describes*),
+`TDR` only peeks at the TX FIFO rather than draining it, and RX overrun is
+silent apart from `RSR.OE`. The datasheet's interrupt bit assignments for
+this block could not be confirmed against hardware — see the module
+docstring before relying on them.
+
+`example/spi_slave_errata.py` walks through five mistakes that look correct
+in review and fail on silicon.
+
 ## Emulating several boards together
 
 `armulator.boards.interconnect` wires boards to each other, so a Pi and a
@@ -188,7 +225,7 @@ nano = machine.add('nano', JetsonNano())
 
 machine.link(GpioLink(pi, 17, nano, 'PA0', name='DATA'))    # Pi drives
 machine.link(GpioLink(nano, 'PA1', pi, 27, name='READY'))   # Jetson answers
-SpiBridge(pi, nano, chip_select=0)
+SpiBridge(pi, pi3, chip_select=0)    # slave end needs a spi_slave block
 
 machine.run_until(lambda: pi.cpu.registers.get(4) == 1)
 ```
