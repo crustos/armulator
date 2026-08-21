@@ -254,6 +254,43 @@ modelled, since that is where GPIO driver logic lives. Write test firmware as
 sequences your production driver performs. For booting real OS images, use
 QEMU's `raspi3b` / `raspi4b` machines instead.
 
+# Validating models against hardware
+
+`armulator.harness` replays a captured driver trace against a peripheral
+model and asserts every read returns what the silicon returned. It is the
+strongest correctness check available without owning the board:
+
+```python
+from armulator.boards import RaspberryPi4
+from armulator.harness import load, replay_on_board
+
+trace = load('capture.txt')          # ftrace rwmmio or canonical format
+report = replay_on_board(RaspberryPi4(), 'gpio', trace,
+                         captured_base=0xFFFF800008A00000)
+print(report.format())
+assert report.ok
+```
+
+Reports carry three things beyond pass/fail: **provenance** (a trace
+recorded from the model and replayed against it is circular — the report
+says so), **coverage** (a PASS on 3 of 33 registers is a weak claim, so
+untouched registers are listed), and **volatile reads** (counters that
+cannot match a capture are executed but not compared, and counted).
+
+Capture recipe and the full workflow are in [RASPI.md](RASPI.md#validating-against-real-hardware).
+`example/replay_driver_trace.py` walks through it.
+
+`traces/` holds baselines recorded from the models — regression guards only,
+not hardware validation. Regenerate with `python3 tools/record_baselines.py`.
+
+# Further reading
+
+- **[RASPI.md](RASPI.md)** — Raspberry Pi register maps, the Pi 3 → Pi 4
+  pull up/down trap, GIC-400 acknowledge/EOI semantics, the SPI slave
+  dialogue protocol and its errata, and the hardware capture recipe.
+- **[JETSON.md](JETSON.md)** — Tegra GPIO structure and masked registers,
+  plus an explicit list of what is a stand-in and what is missing.
+
 # Running the tests
 
 Running the tests can be done easily with pytest:
