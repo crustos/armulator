@@ -129,6 +129,79 @@ class MyDevice(MMIODevice):
 board.attach('mydev', MyDevice(0x1000), offset=0x100000)
 ```
 
+## Interrupt routing (GIC-400)
+
+The Pi 4 and Jetson Nano boards include a GIC-400 interrupt controller, with
+device lines wired to their SoC SPI numbers. Interrupts only reach the CPU
+once firmware enables the distributor and CPU interface, as on real silicon:
+
+```python
+from armulator.peripherals.gic400 import (
+    GICC_CTLR, GICC_PMR, GICD_CTLR, GICD_ISENABLER, GICC_IAR, GICC_EOIR,
+)
+
+gic = board.gic
+gic.write_register(GICD_CTLR, 1)          # enable distributor
+gic.write_register(GICC_CTLR, 1)          # enable CPU interface
+gic.write_register(GICC_PMR, 0xFF)        # unmask all priorities
+gic.write_register(GICD_ISENABLER + 4, 1 << 17)
+
+intid = gic.read_register(GICC_IAR)       # acknowledge
+...                                        # service the device
+gic.write_register(GICC_EOIR, intid)      # end of interrupt
+```
+
+Priority, edge/level configuration and the acknowledge/EOI handshake are all
+modelled, including the case that catches real drivers out: a level-triggered
+source that is still asserting at EOI immediately re-presents.
+
+The Pi 3 has no GIC (the BCM2837 uses the legacy controller), so it falls
+back to polling device lines directly.
+
+## Serial buses
+
+`Bcm2835Spi` and `Bcm2835I2c` are available on all boards as `board.spi` and
+`board.i2c`. Slaves are plain Python objects:
+
+```python
+from armulator.peripherals.serial_bus import I2cSlaveDevice, SpiSlaveDevice
+
+sensor = board.i2c.attach_slave(I2cSlaveDevice(address=0x48, registers={0: 0xDE}))
+board.spi.attach_slave(SpiSlaveDevice(responses=b'\x99'), chip_select=0)
+```
+
+I2C models the NACK path — addressing a slave that isn't on the bus sets ERR
+in the status register.
+
+## Emulating several boards together
+
+`armulator.boards.interconnect` wires boards to each other, so a Pi and a
+Jetson can exchange signals the way they would on a bench:
+
+```python
+from armulator.boards import JetsonNano, RaspberryPi4
+from armulator.boards.interconnect import GpioLink, Machine, SpiBridge
+
+machine = Machine()
+pi = machine.add('pi', RaspberryPi4())
+nano = machine.add('nano', JetsonNano())
+
+machine.link(GpioLink(pi, 17, nano, 'PA0', name='DATA'))    # Pi drives
+machine.link(GpioLink(nano, 'PA1', pi, 27, name='READY'))   # Jetson answers
+SpiBridge(pi, nano, chip_select=0)
+
+machine.run_until(lambda: pi.cpu.registers.get(4) == 1)
+```
+
+Boards are stepped round-robin in instruction slices with all links settled
+between slices — deterministic and repeatable, but not cycle-accurate, since
+these are independent cores with independent clocks. Only pins configured as
+outputs drive a wire; an input pin releases it, and the receiver falls back
+to its own pull resistor.
+
+See `example/two_device_link.py` for a full walkthrough including a two-way
+handshake that neither board can complete alone.
+
 Assembling test firmware from source requires `keystone-engine`
 (`pip install keystone-engine`); pre-assembled bytes work without it.
 
