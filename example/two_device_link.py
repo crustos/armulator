@@ -17,13 +17,14 @@ Scenarios below, in order:
 
   1. one-way signal      Pi raises a line, Jetson observes it
   2. handshake           Jetson answers on a second line, Pi waits for it
-  3. SPI payload         Pi shifts bytes out, Jetson's buffer receives them
+  3. SPI payload         Pi 4 master shifts bytes to a Pi 3 SPI slave
   4. interrupt routing   the incoming line raises a real GIC interrupt
 """
 
-from armulator.boards import JetsonNano, RaspberryPi4
+from armulator.boards import JetsonNano, RaspberryPi3, RaspberryPi4
 from armulator.boards.firmware import firmware
 from armulator.boards.interconnect import GpioLink, Machine, SpiBridge
+from armulator.peripherals.spi_slave import address_octet
 from armulator.peripherals.gic400 import (
     GICC_CTLR, GICC_IAR, GICC_PMR, GICD_CTLR, GICD_ICFGR, GICD_ISENABLER,
 )
@@ -141,39 +142,68 @@ def scenario_2_handshake():
 
 
 # ----------------------------------------------------------------------
+SLAVE_ADDRESS = 0x2A
+
+
 def scenario_3_spi_payload():
-    """The Pi shifts a payload to the Jetson over SPI."""
+    """
+    A Pi 4 master shifts a payload to a Pi 3 acting as SPI slave.
+
+    The slave end is a Pi rather than the Jetson deliberately: the BCM2835
+    SPI slave is a real modelled peripheral, while the Jetson's SPI is a
+    Broadcom stand-in with no slave model.  Bridging to it is refused
+    rather than faked.
+
+    Note the dialogue header.  This block is half duplex and expects an
+    address/direction octet first -- a master that simply shifts data is
+    ignored, on hardware and here.
+    """
     payload = b'\xDE\xAD\xBE\xEF'
     body = f"""
         ldr r0, ={PI_SPI:#x}
         mov r1, #0x80              @ CS: TA=1, chip select 0
         str r1, [r0, #0x00]
+        mov r2, #{address_octet(SLAVE_ADDRESS, read=False)}
+        str r2, [r0, #0x04]        @ address octet: write to 0x2A
     """
     for byte in payload:
         body += f"""
         mov r2, #{byte}
         str r2, [r0, #0x04]        @ FIFO: shift out 0x{byte:02X}
     """
-    pi = build_pi(body, trace=True)
-    nano = build_nano(f"""
-        ldr r0, ={NANO_GPIO:#x}
+    body += """
         mov r1, #0
-        str r1, [r0, #0x00]
-    """)
+        str r1, [r0, #0x00]        @ TA=0: end the dialogue
+    """
+    master = build_pi(body, trace=True)
+
+    slave = RaspberryPi3()
+    slave.load(slave.CODE_BASE, firmware(f"""
+        ldr r0, ={0x3F214000:#x}
+        mov r1, #{SLAVE_ADDRESS}
+        str r1, [r0, #0x08]        @ SLV: our address
+        mov r2, #0x300
+        orr r2, r2, #0x3           @ TXE | RXE | SPI | EN
+        str r2, [r0, #0x0C]        @ CR
+    """, address=slave.CODE_BASE))
+    slave.start()
+    # Bring the slave up before the master starts talking.  Under the
+    # round-robin scheduler the master would otherwise complete its whole
+    # dialogue in its first slice, against a block that is not yet enabled
+    # -- the same startup-ordering hazard as on a real bench.
+    slave.run(500)
 
     machine = Machine()
-    machine.add('pi', pi)
-    machine.add('nano', nano)
-    bridge = SpiBridge(pi, nano, chip_select=0)
-    bridge.queue_slave_response(b'\x01\x02\x03\x04')
-    machine.run(3000)
+    machine.add('master', master)
+    machine.add('slave', slave)
+    bridge = SpiBridge(master, slave, chip_select=0)
+    machine.run(5000)
 
-    received = bytes(m for m, _ in bridge.exchanges)
-    returned = bytes(s for _, s in bridge.exchanges)
     print('\n3. SPI payload')
-    print(f'   Pi sent        = {received.hex()}')
-    print(f'   Jetson replied = {returned.hex()}')
-    assert received == payload
+    print(f'   master shifted (with header) = {bridge.mosi.hex()}')
+    print(f'   slave RX FIFO                = {slave.spi_slave.received.hex()}')
+    print(f'   dialogues seen               = {slave.spi_slave.dialogues}')
+    assert slave.spi_slave.received == payload
 
 
 # ----------------------------------------------------------------------
