@@ -14,7 +14,8 @@ ftrace recipe.
 """
 
 from pathlib import Path
-
+import os, sys
+sys.path.append( os.path.abspath( os.path.join(os.path.split(__file__)[0], '..')) )
 from armulator.boards import JetsonNano, RaspberryPi3, RaspberryPi4
 from armulator.boards.firmware import firmware
 from armulator.harness import TraceRecorder
