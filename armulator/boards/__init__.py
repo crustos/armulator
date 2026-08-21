@@ -308,3 +308,8 @@ class JetsonNano(Board):
         self.connect_irq(self.gpio, self.GPIO_SPI)
         self.connect_irq(self.uart, self.UART_SPI)
         self.connect_irq(self.spi, self.SPI_SPI)
+
+
+__all__ = [
+    'Board', 'RaspberryPi3', 'RaspberryPi4', 'JetsonNano',
+]
