@@ -150,9 +150,9 @@ def scenario_3_spi_payload():
     A Pi 4 master shifts a payload to a Pi 3 acting as SPI slave.
 
     The slave end is a Pi rather than the Jetson deliberately: the BCM2835
-    SPI slave is a real modelled peripheral, while the Jetson's SPI is a
-    Broadcom stand-in with no slave model.  Bridging to it is refused
-    rather than faked.
+    SPI slave is a real modelled peripheral, while the Jetson has no SPI
+    slave model at all (its master is now a real Tegra controller, but
+    slave mode is not implemented).  Bridging to it is refused, not faked.
 
     Note the dialogue header.  This block is half duplex and expects an
     address/direction octet first -- a master that simply shifts data is
