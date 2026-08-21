@@ -15,7 +15,7 @@ ftrace recipe.
 
 from pathlib import Path
 
-from armulator.boards import RaspberryPi3, RaspberryPi4
+from armulator.boards import JetsonNano, RaspberryPi3, RaspberryPi4
 from armulator.boards.firmware import firmware
 from armulator.harness import TraceRecorder
 from armulator.peripherals.spi_slave import (
@@ -150,9 +150,36 @@ def spi_slave_dialogue():
     return recorder.trace()
 
 
+def tegra_spi_transfer():
+    """Tegra SPI master configured and triggered via PIO."""
+    from armulator.peripherals.spi_tegra import (
+        CMD1_M_S, CMD1_PIO, CMD1_RX_EN, CMD1_TX_EN,
+    )
+    board = JetsonNano()
+    recorder = TraceRecorder(board.spi, 0x7000D400, name='tegra_spi_transfer')
+    cmd = CMD1_M_S | CMD1_TX_EN | CMD1_RX_EN | 7
+    run(board, f"""
+        ldr r0, =0x7000D400
+        ldr r1, ={cmd:#x}
+        str r1, [r0, #0x000]       @ COMMAND1
+        mov r2, #0x54
+        str r2, [r0, #0x108]       @ TX_FIFO
+        mov r2, #0x42
+        str r2, [r0, #0x108]
+        mov r3, #1
+        str r3, [r0, #0x024]       @ DMA_BLK: two packets
+        ldr r1, ={cmd | CMD1_PIO:#x}
+        str r1, [r0, #0x000]       @ COMMAND1 with PIO: go
+        ldr r4, [r0, #0x010]       @ TRANS_STATUS
+        ldr r5, [r0, #0x014]       @ FIFO_STATUS
+    """)
+    return recorder.trace()
+
+
 GENERATORS = [
     gpio_blink, gpio_pull_bcm2711, uart_hello,
     spi_master_transfer, i2c_write, spi_slave_dialogue,
+    tegra_spi_transfer,
 ]
 
 
