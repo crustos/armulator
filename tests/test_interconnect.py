@@ -4,6 +4,9 @@ from armulator.boards import JetsonNano, RaspberryPi3, RaspberryPi4
 from armulator.boards.firmware import HAVE_KEYSTONE, firmware
 from armulator.boards.interconnect import GpioLink, Machine, SpiBridge
 from armulator.peripherals.gpio_bcm import GpioFunction
+from armulator.peripherals.spi_slave import (
+    CR_EN, CR_RXE, CR_SPI, CR_TXE, SLV_CR, SLV_SLV, address_octet,
+)
 
 needs_keystone = pytest.mark.skipif(
     not HAVE_KEYSTONE, reason='keystone-engine required to assemble firmware'
@@ -99,26 +102,62 @@ class TestGpioLink:
         assert b.gpio.level(5) is True
 
 
+SLAVE_ADDRESS = 0x2A
+
+
+def ready_slave(board):
+    """Enable a board's SPI slave block at SLAVE_ADDRESS."""
+    board.spi_slave.write_register(SLV_SLV, SLAVE_ADDRESS)
+    board.spi_slave.write_register(SLV_CR, CR_EN | CR_SPI | CR_RXE | CR_TXE)
+    return board
+
+
 class TestSpiBridge:
+    """
+    The slave end is a Pi, not the Jetson: the BCM2835 SPI slave block is a
+    real modelled peripheral, whereas the Jetson has no slave model (its
+    master is a Broadcom stand-in).  Bridging to a board without a slave
+    controller is rejected rather than silently faked.
+    """
 
     def test_master_bytes_reach_the_slave_board(self):
-        pi, nano = RaspberryPi4(), JetsonNano()
-        bridge = SpiBridge(pi, nano)
+        pi, slave = RaspberryPi4(), ready_slave(RaspberryPi3())
+        SpiBridge(pi, slave)
+        pi.spi.write_register(0x00, 0x80)
+        pi.spi.write_register(0x04, address_octet(SLAVE_ADDRESS, read=False))
         pi.spi.write_register(0x04, 0xAB)
-        assert [m for m, _ in bridge.exchanges] == [0xAB]
+        pi.spi.write_register(0x00, 0x00)
+        assert slave.spi_slave.received == b'\xAB'
 
     def test_slave_response_returns_to_master(self):
-        pi, nano = RaspberryPi4(), JetsonNano()
-        bridge = SpiBridge(pi, nano)
+        pi, slave = RaspberryPi4(), ready_slave(RaspberryPi3())
+        bridge = SpiBridge(pi, slave)
         bridge.queue_slave_response(b'\x5A')
+        pi.spi.write_register(0x00, 0x80)
+        pi.spi.write_register(0x04, address_octet(SLAVE_ADDRESS, read=True))
+        pi.spi.read_register(0x04)              # drain the address echo
         pi.spi.write_register(0x04, 0x00)
         assert pi.spi.read_register(0x04) == 0x5A
 
     def test_bridge_registers_on_the_right_chip_select(self):
-        pi, nano = RaspberryPi4(), JetsonNano()
-        SpiBridge(pi, nano, chip_select=1)
+        pi, slave = RaspberryPi4(), RaspberryPi3()
+        SpiBridge(pi, slave, chip_select=1)
         assert 1 in pi.spi.slaves
         assert 0 not in pi.spi.slaves
+
+    def test_bridge_to_board_without_slave_is_rejected(self):
+        with pytest.raises(ValueError):
+            SpiBridge(RaspberryPi4(), JetsonNano())
+
+    def test_master_without_address_octet_is_ignored(self):
+        # Raw data with no dialogue header goes nowhere, as on hardware.
+        pi, slave = RaspberryPi4(), ready_slave(RaspberryPi3())
+        SpiBridge(pi, slave)
+        pi.spi.write_register(0x00, 0x80)
+        pi.spi.write_register(0x04, 0xAB)       # treated as the address octet
+        pi.spi.write_register(0x04, 0xCD)
+        pi.spi.write_register(0x00, 0x00)
+        assert slave.spi_slave.received == b''
 
 
 class TestMachine:
@@ -264,17 +303,23 @@ class TestCrossDeviceFirmware:
             ldr r0, ={PI_SPI:#x}
             mov r1, #0x80
             str r1, [r0, #0x00]
+            mov r2, #{address_octet(SLAVE_ADDRESS, read=False)}
+            str r2, [r0, #0x04]
         """
         for byte in payload:
             body += f"""
             mov r2, #{byte}
             str r2, [r0, #0x04]
         """
+        body += f"""
+            mov r1, #0
+            str r1, [r0, #0x00]
+        """
         pi = loaded(RaspberryPi4(), body)
-        nano = loaded(JetsonNano(), 'mov r0, #0')
+        slave = loaded(ready_slave(RaspberryPi3()), 'mov r0, #0')
         machine = Machine()
         machine.add('pi', pi)
-        machine.add('nano', nano)
-        bridge = SpiBridge(pi, nano)
+        machine.add('slave', slave)
+        SpiBridge(pi, slave)
         machine.run(5000)
-        assert bytes(m for m, _ in bridge.exchanges) == payload
+        assert slave.spi_slave.received == payload
