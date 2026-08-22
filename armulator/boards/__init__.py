@@ -60,6 +60,18 @@ class Board:
     ARCH = 'armv6'
     #: Default number of cores; override in a subclass or pass ``cores=``.
     CORES = 1
+    #: CNTFRQ_EL0 for this board's architected timer, in Hz. This is a board
+    #: property, not an architectural constant: firmware reads CNTFRQ_EL0 to
+    #: work out how many counter ticks a millisecond is, so a wrong value
+    #: here makes every delay and every tick rate wrong by that ratio without
+    #: anything reporting an error.
+    TIMER_FREQUENCY = 19200000
+    #: Whether an access to an address no controller claims aborts, as it
+    #: would on a real bus, instead of reading zero. Only meaningful with the
+    #: AArch64 core, and only with the MMU off -- see
+    #: ``ArmV8._check_physical_address``. Off on the ARMv6 boards, whose
+    #: tests depend on the permissive behaviour.
+    FAULT_ON_UNMAPPED = False
 
     def __init__(self, ram_size=0x100000, trace=False, arch=None, cores=None):
         arch = self.ARCH if arch is None else arch
@@ -95,11 +107,29 @@ class Board:
         # the peripheral map directly, as it does at reset on real hardware.
         self.cpu_adapter.set_flat_addressing()
 
+        # The architected timer belongs to the core, but its frequency is a
+        # property of the board wiring it. The ARMv6 core has no such timer.
+        for core in self.cores:
+            timer = getattr(core.registers, 'generic_timer', None)
+            if timer is not None:
+                timer.frequency = self.TIMER_FREQUENCY
+
         self.ram = RAM(ram_size)
         self.cpu_adapter.set_memories([
             MemoryController(self.ram, self.RAM_BASE, self.RAM_BASE + ram_size)
         ])
         self._build()
+
+        # With the map complete, unclaimed accesses can be made to abort the
+        # way a real bus does. Only the AArch64 core raises the external abort
+        # (see ArmV8._check_physical_address); the ARMv6 model and its tests
+        # rely on unmapped reads returning zero, so this is left off there.
+        if self.FAULT_ON_UNMAPPED:
+            for core in self.cores:
+                mem = getattr(core, 'mem', None)
+                if mem is not None and hasattr(mem, 'fault_on_unmapped'):
+                    mem.fault_on_unmapped = True
+
         if self.cluster is not None:
             self.cluster.gic = self.gic
             # Reset every core, then reapply flat addressing: reset restores the
@@ -238,18 +268,19 @@ class Board:
     # ------------------------------------------------------------------
     def sample_timer(self) -> None:
         """
-        Drive the EL1 physical timer's PPI from the core's own timer.
+        Drive each core's EL1 physical timer PPI from that core's own timer.
 
         The generic timer is part of the core rather than a peripheral, so it
         is not in :attr:`devices` and ``Gic400.refresh`` does not see it. It
-        arrives as PPI 30, which is private to a core -- this model keeps one
-        line per interrupt ID rather than one per core, so on a cluster the
-        primary's timer drives it. The ARMv6 core has no architected timer and
-        is skipped.
+        arrives as PPI 30, which is banked: a four-core cluster has four
+        independent timers and four independent interrupt 30s, so each core's
+        line is driven into its own bank. The ARMv6 core has no architected
+        timer and is skipped.
         """
-        timer = getattr(self.cpu.registers, 'generic_timer', None)
-        if timer is not None:
-            self.gic.set_line(TIMER_PPI, timer.irq_pending)
+        for cpu_id, core in enumerate(self.cores):
+            timer = getattr(core.registers, 'generic_timer', None)
+            if timer is not None:
+                self.gic.set_line(TIMER_PPI, timer.irq_pending, cpu=cpu_id)
 
     def pending_irq(self):
         """Names of devices currently asserting their IRQ line."""
@@ -297,6 +328,8 @@ class RaspberryPi3(Board):
 
     PERIPHERAL_BASE = 0x3F000000
     CODE_BASE = 0x00008000
+    #: The BCM2837's architected timer runs at 19.2 MHz.
+    TIMER_FREQUENCY = 19200000
 
     GPIO_OFFSET = 0x200000
     UART0_OFFSET = 0x201000
@@ -327,6 +360,10 @@ class RaspberryPi4(Board):
 
     PERIPHERAL_BASE = 0xFE000000
     CODE_BASE = 0x00008000
+    #: The BCM2711 clocks its architected timer at 54 MHz, unlike the Pi 3's
+    #: 19.2 MHz. Firmware derives its tick period from CNTFRQ_EL0, so this
+    #: being wrong scales every delay by 2.8x with nothing reporting it.
+    TIMER_FREQUENCY = 54000000
 
     GPIO_OFFSET = 0x200000
     UART0_OFFSET = 0x201000
@@ -433,6 +470,9 @@ class JetsonNanoA64(JetsonNano):
     """
 
     ARCH = 'armv8'
+    #: The AArch64 core can raise the external abort, so unclaimed accesses
+    #: fault here rather than reading zero.
+    FAULT_ON_UNMAPPED = True
 
 
 class JetsonNanoA64Smp(JetsonNanoA64):
@@ -453,6 +493,9 @@ class RaspberryPi3A64(RaspberryPi3):
     """
 
     ARCH = 'armv8'
+    #: The AArch64 core can raise the external abort, so unclaimed accesses
+    #: fault here rather than reading zero.
+    FAULT_ON_UNMAPPED = True
 
 
 class RaspberryPi4A64(RaspberryPi4):
@@ -462,6 +505,9 @@ class RaspberryPi4A64(RaspberryPi4):
     """
 
     ARCH = 'armv8'
+    #: The AArch64 core can raise the external abort, so unclaimed accesses
+    #: fault here rather than reading zero.
+    FAULT_ON_UNMAPPED = True
 
 
 __all__ = [
