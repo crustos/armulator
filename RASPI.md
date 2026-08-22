@@ -11,19 +11,20 @@ For the general API see [README.md](README.md). For the Jetson Nano see
 
 ## Scope and honest limits
 
-**The CPU is ARMv6.** armulator's core implements ARMv6 A32/T32, integer
-only. The Pi 3 (BCM2837, Cortex-A53) and Pi 4 (BCM2711, Cortex-A72) are
-ARMv8-A. These boards therefore **cannot**:
+**These boards default to the ARMv6 core** (A32/T32, integer only), while the
+Pi 3 (BCM2837, Cortex-A53) and Pi 4 (BCM2711, Cortex-A72) are ARMv8-A. Use
+`RaspberryPi3A64` / `RaspberryPi4A64` for the AArch64 core, which does implement
+SIMD, the MMU and multi-core — see [AARCH64.md](AARCH64.md).
 
-- execute AArch64 binaries
-- boot a stock Raspberry Pi OS kernel
-- run NEON or VFP code (no SIMD instructions are implemented at all)
-- reproduce cache, MMU, or multi-core behaviour
+The Pi-specific documentation here assumes the ARMv6 boards, since that is the
+better-travelled path for peripheral work. Either way the peripheral register
+interfaces are the same, and that is where GPIO and bus driver logic lives:
+writing test firmware as 32-bit ARM (`-marm -march=armv6`) exercises the same
+register sequences a production AArch64 driver performs.
 
-What they **can** do is model the peripheral register interfaces
-faithfully. That is where GPIO and bus driver logic actually lives, so
-writing your test firmware as 32-bit ARM (`-marm -march=armv6`) exercises
-the same register sequences your production AArch64 driver performs.
+**Neither core boots a stock Raspberry Pi OS kernel.** Modelling the CPU is not
+modelling the SoC — there is no mailbox, no VideoCore, no SD host, no USB, no
+clock manager. A kernel gets nowhere without them.
 
 If you need to boot an OS image, use QEMU's `raspi3b` or `raspi4b` machines
 instead. This project is not competing with that and will not get there.

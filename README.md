@@ -1,6 +1,16 @@
 # Description
 
-A pure python ARM emulator
+A pure python ARM emulator, with two CPU cores:
+
+- **ARMv6** (`armulator.armv6`) — AArch32, A32 and T32, integer only.
+- **AArch64** (`armulator.armv8`) — modelled on the **Cortex-A57**, with all
+  four exception levels, SIMD and floating point, two-stage address
+  translation, a four-core cluster, a configurable memory model, and AArch32
+  execution at EL0. It runs GCC output at every optimisation level, in both
+  execution states. See **[AARCH64.md](AARCH64.md)**.
+
+Both sit on the same memory controller and drive the same peripheral models, so
+a board can be built around either.
 
 # Installation
 
@@ -20,6 +30,8 @@ python3 -m pip install --user -U -e .
 ```
 
 # Usage
+
+## ARMv6
 
 To create a processor object, you need to import it first:
 ```python
@@ -71,6 +83,37 @@ The last thing we need to do is to really run the processor, which can be done w
 ```python
 arm.emulate_cycle()
 ```
+
+## AArch64
+
+The AArch64 core takes its memory map at construction and needs no global
+configuration:
+
+```python
+from armulator.armv8.arm_v8 import ArmV8
+
+cpu = ArmV8([{'mem_type': 'RAM', 'beginning': 0x0, 'end': 0x10000}])
+cpu.take_reset()
+cpu.registers.branch_to(0x1000)
+cpu.emulate_cycle()
+```
+
+Registers differ from AArch32 in ways worth knowing before you start. `X0`–`X30`
+are flat, with no banking by mode. Register 31 is context dependent — zero in
+most instructions, `SP` in a few — so you say which you mean:
+
+```python
+cpu.registers.get_x(31)          # always 0, this is XZR
+cpu.registers.get_reg_or_sp(31)  # the stack pointer
+```
+
+A 32-bit write zeroes the upper half of its destination, and the same rule
+applies to the vector registers: writing `D0` clears bits 127:64 of `V0`.
+
+Reset leaves the core at EL1 with the MMU off and SIMD trapped. Firmware enables
+what it needs, as it would on hardware — see
+[AARCH64.md](AARCH64.md) for translation, exception levels, multi-core and the
+memory model.
 
 
 # Board and peripheral emulation
@@ -244,15 +287,47 @@ Assembling test firmware from source requires `keystone-engine`
 
 See `example/gpio_driver_test.py` for a worked walkthrough.
 
-## Scope
+## Choosing a core
 
-The CPU core is **ARMv6** (A32/T32, integer only). The Pi 3, Pi 4 and Jetson
-Nano all ship ARMv8-A cores, so these boards do **not** run AArch64 binaries
-or stock vendor kernels — the peripheral *register interfaces* are what is
-modelled, since that is where GPIO driver logic lives. Write test firmware as
-32-bit ARM (`-marm -march=armv6`) and it exercises the same register
-sequences your production driver performs. For booting real OS images, use
-QEMU's `raspi3b` / `raspi4b` machines instead.
+Every board takes an `arch=` argument, and the `*A64` classes are the same
+boards built around the AArch64 core:
+
+| Board | Core | Notes |
+|---|---|---|
+| `RaspberryPi3`, `RaspberryPi4`, `JetsonNano` | ARMv6 | A32/T32 firmware |
+| `RaspberryPi3A64`, `RaspberryPi4A64`, `JetsonNanoA64` | AArch64 | single core |
+| `JetsonNanoA64Smp` | AArch64 | the full quad-core A57 cluster |
+
+The ARMv6 boards remain the default. They are the older and better-travelled
+path, and the peripheral *register interfaces* — where GPIO driver logic
+actually lives — are identical either way, so A32 test firmware exercises the
+same sequences a production AArch64 driver performs.
+
+Reach for the AArch64 boards when the code under test is AArch64: compiler
+output, code that uses the MMU or several cores, or anything where memory
+ordering matters.
+
+```python
+from armulator.boards import JetsonNanoA64
+from armulator.boards.firmware import firmware_a64
+
+board = JetsonNanoA64()
+board.load(board.CODE_BASE, firmware_a64('''
+        movz x0, #0x6000, lsl #16
+        movk x0, #0xD000
+        movz w1, #1
+        str  w1, [x0, #0x00]        // CNF port A -> GPIO
+        str  w1, [x0, #0x10]        // OE  -> output
+        str  w1, [x0, #0x20]        // OUT -> high
+''', address=board.CODE_BASE))
+board.start()
+board.run(200)
+assert board.gpio.level('PA0') is True
+```
+
+Neither core boots stock vendor kernels — the peripheral coverage is nowhere
+near a whole SoC. For booting real OS images, use QEMU's `raspi3b` / `raspi4b`
+machines instead.
 
 # Validating models against hardware
 
@@ -291,6 +366,10 @@ not hardware validation. Regenerate with `python3 tools/record_baselines.py`.
 - **[JETSON.md](JETSON.md)** — Tegra GPIO structure and masked registers,
   the Tegra SPI controller's triggered-transfer model and its two
   off-by-one register traps, plus an explicit list of what is missing.
+- **[AARCH64.md](AARCH64.md)** — the AArch64 core: instruction coverage,
+  exception levels and routing, two-stage translation, the multi-core cluster
+  and PSCI bring-up, and the memory model that makes a missing barrier
+  observable.
 
 # Running the tests
 

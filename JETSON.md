@@ -14,10 +14,15 @@ from the API — both boards look the same from the outside.
 
 ## Scope and honest limits
 
-**The CPU is ARMv6.** The Jetson Nano's real core is a quad Cortex-A57
-(ARMv8-A). As with the Pi boards, this model cannot execute AArch64
-binaries, run the vendor kernel, or reproduce anything above the peripheral
-register interface.
+**The CPU can be either core.** The Jetson Nano's real processor is a quad
+Cortex-A57 (ARMv8-A), and that is now modelled: `JetsonNanoA64` gives one A57,
+`JetsonNanoA64Smp` the full four-core cluster. `JetsonNano` remains the ARMv6
+board, and remains the default. See [choosing a core](#choosing-a-core) below.
+
+**The vendor kernel still will not boot.** Modelling the CPU is not the same as
+modelling the SoC. Four peripherals out of the T210's several dozen are present
+— no memory controller, no clock and reset controller, no power management, no
+display, no USB. A kernel gets nowhere without them.
 
 **The boot chain is out of scope and will stay that way.** The Tegra X1
 boots through a signed chain — boot ROM, then CBoot — that is proprietary
@@ -48,6 +53,116 @@ board = JetsonNano(trace=True)
 
 Memory layout differs from the Pi boards: RAM is based at `0x80000000` and
 code loads at `0x80080000`, matching where a Tegra kernel image lands.
+
+---
+
+## Choosing a core
+
+| Class | Cores | Firmware |
+|---|---|---|
+| `JetsonNano` | 1 × ARMv6 | A32/T32 |
+| `JetsonNanoA64` | 1 × Cortex-A57 | A64 |
+| `JetsonNanoA64Smp` | 4 × Cortex-A57 | A64 |
+
+The peripheral models are identical across all three — same addresses, same
+registers, same semantics. Only the processor differs, so A32 test firmware
+exercises exactly the register sequences a production AArch64 driver performs.
+
+The same GPIO sequence, written for each core:
+
+```python
+# ARMv6
+from armulator.boards import JetsonNano
+from armulator.boards.firmware import firmware
+
+board = JetsonNano()
+board.load(board.CODE_BASE, firmware('''
+        ldr r0, =0x6000D000
+        mov r1, #1
+        str r1, [r0, #0x00]        @ CNF port A -> GPIO
+        str r1, [r0, #0x10]        @ OE  -> output
+        str r1, [r0, #0x20]        @ OUT -> high
+''', address=board.CODE_BASE))
+```
+
+```python
+# AArch64
+from armulator.boards import JetsonNanoA64
+from armulator.boards.firmware import firmware_a64
+
+board = JetsonNanoA64()
+board.load(board.CODE_BASE, firmware_a64('''
+        movz x0, #0x6000, lsl #16
+        movk x0, #0xD000
+        movz w1, #1
+        str  w1, [x0, #0x00]        // CNF port A -> GPIO
+        str  w1, [x0, #0x10]        // OE  -> output
+        str  w1, [x0, #0x20]        // OUT -> high
+''', address=board.CODE_BASE))
+```
+
+Both then `board.start()`, `board.run(200)`, and leave `PA0` high.
+
+### Peripherals through the MMU
+
+With translation enabled the GPIO block can sit at a kernel virtual address, and
+the peripheral window should be mapped as **Device** memory in `MAIR` so
+accesses are neither buffered nor reordered:
+
+```python
+board = JetsonNanoA64(ram_size=0x400000)
+# ... build tables: RAM identity-mapped as Normal, 0x6000D000 mapped at
+#     0xC0000000 as Device ...
+board.load(board.CODE_BASE, firmware_a64('''
+        mrs  x3, sctlr_el1
+        orr  x3, x3, #1              // SCTLR_EL1.M
+        msr  sctlr_el1, x3
+        isb
+        movz x0, #0xC000, lsl #16    // the GPIO block, virtually
+        movz w1, #1
+        str  w1, [x0, #0x00]
+''', address=board.CODE_BASE))
+```
+
+Code must be identity-mapped across the instruction that enables the MMU, or the
+next fetch lands somewhere unmapped. `tests/test_a64_mmu_firmware.py` is a
+working example.
+
+### Bringing up the other three cores
+
+Secondary cores start parked, as they do on hardware, and are released through
+PSCI — the same `SMC` calls the vendor firmware answers:
+
+```python
+board = JetsonNanoA64Smp()
+board.cluster.slice_size = 5
+```
+
+```asm
+        movz x20, #1                 // start with core 1
+next:   movz x0, #0x0003
+        movk x0, #0xC400, lsl #16    // PSCI CPU_ON
+        mov  x1, x20                 // target MPIDR (Aff0 = core number)
+        movz x2, #...                // entry point
+        mov  x3, x20                 // context id, arrives in the core's x0
+        smc  #0
+        add  x20, x20, #1
+        cmp  x20, #4
+        b.lo next
+```
+
+Each core reads its own number from `MPIDR_EL1`:
+
+```asm
+        mrs  x10, mpidr_el1
+        and  x10, x10, #0xFF         // Aff0
+```
+
+All four share the GPIO controller, so concurrent access needs a lock —
+`LDAXR`/`STLXR` to acquire and `STLR` to release. A plain `STR` release looks
+correct under the default memory model and is not; see
+[AARCH64.md](AARCH64.md#the-memory-model) for how to make that failure visible.
+`tests/test_a64_smp_firmware.py` runs four cores toggling `PA0` under a lock.
 
 ---
 
@@ -235,7 +350,7 @@ real model. See [RASPI.md](RASPI.md).
 - Memory controller
 - Everything GPU-related
 
-### GIC-500
+### GIC-500 and multi-core interrupts
 
 Modelled with the `Gic400` class. GIC-500 is GICv2-compatible at the
 register level for the distributor and CPU interface, which is the part
@@ -243,6 +358,22 @@ that matters here. GICv3 features (affinity routing, ITS, system register
 access) are not modelled. The SPI numbers wired up
 (`GPIO_SPI`, `UART_SPI`, `SPI_SPI`) are placeholders rather than verified
 Tegra X1 interrupt assignments.
+
+On `JetsonNanoA64Smp` the CPU interface registers (`GICC_CTLR`, `GICC_PMR`) are
+banked per core, so each core enables its own interface. Peripheral interrupts
+are routed by the distributor's target byte, and SGIs work as inter-processor
+interrupts including broadcast to several cores at once:
+
+```python
+gic.write_register(GICD_SGIR, (target_mask << 16) | sgi_id)
+```
+
+An interrupt wakes a core out of `WFI` whether or not it is unmasked, since the
+wake-up condition is the interrupt arriving rather than it being taken.
+
+Interrupt routing across exception levels follows `HCR_EL2.IMO` and
+`SCR_EL3.IRQ` — a hypervisor or secure firmware can claim a guest's interrupts.
+See [AARCH64.md](AARCH64.md#registers-and-exception-levels).
 
 ---
 
