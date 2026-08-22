@@ -900,6 +900,10 @@ class ArmV8:
     def emulate_cycle(self):
         self.instruction_count += 1
         self.clock.tick()
+        # The architected counter is free-running, so it advances whatever the
+        # core is doing -- including while it is spinning in a delay loop
+        # waiting for exactly this counter to move.
+        self.registers.generic_timer.tick()
         self.retire_pending_stores()
         if self.registers.using_aarch32():
             self.emulate_aarch32_cycle()

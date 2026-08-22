@@ -16,6 +16,7 @@ from armulator.armv8.bits_ops import (
     set_substring,
     substring,
 )
+from armulator.armv8.generic_timer import GenericTimer
 from armulator.armv8.enums import EL, InstrSet
 
 ZR = 31
@@ -123,6 +124,10 @@ class Registers:
         #: Each entry is (address, size, reload) - see ArmV8.note_deferred_load.
         self.pending_loads = {}
         self.event_register = False
+
+        #: The core's EL1 physical timer. Its counter advances as instructions
+        #: retire; see armulator.armv8.generic_timer.
+        self.generic_timer = GenericTimer()
 
         self.system_registers = {}
         self._init_system_registers()
@@ -395,8 +400,6 @@ class Registers:
             # FPCR / FPSR
             (0b11, 0b011, 0b0100, 0b0100, 0b000): 0,
             (0b11, 0b011, 0b0100, 0b0100, 0b001): 0,
-            # CNTFRQ_EL0 - Jetson Nano runs its architected timer at 19.2MHz
-            (0b11, 0b011, 0b1110, 0b0000, 0b000): 19200000,
         }
 
     def set_mpidr(self, cpu_id: int) -> None:
@@ -480,6 +483,22 @@ class Registers:
         stack = self.BANKED_STACK_POINTERS.get(key)
         if stack is not None:
             return self.get_sp_el(stack)
+
+        timer = self.generic_timer
+        if key == (0b11, 0b011, 0b1110, 0b0000, 0b000):      # CNTFRQ_EL0
+            return timer.frequency
+        if key == (0b11, 0b011, 0b1110, 0b0000, 0b001):      # CNTPCT_EL0
+            return timer.count
+        if key == (0b11, 0b011, 0b1110, 0b0000, 0b010):      # CNTVCT_EL0
+            # No virtual offset is modelled, so the virtual counter tracks
+            # the physical one exactly.
+            return timer.count
+        if key == (0b11, 0b011, 0b1110, 0b0010, 0b000):      # CNTP_TVAL_EL0
+            return timer.tval
+        if key == (0b11, 0b011, 0b1110, 0b0010, 0b001):      # CNTP_CTL_EL0
+            return timer.ctl
+        if key == (0b11, 0b011, 0b1110, 0b0010, 0b010):      # CNTP_CVAL_EL0
+            return timer.compare
         return None
 
     def _special_system_register_write(self, key, value) -> bool:
@@ -490,6 +509,23 @@ class Registers:
             self.pstate.daif = substring(value, 9, 6)
             return True
         if key == (0b11, 0b000, 0b0100, 0b0010, 0b010):  # CurrentEL is read only
+            return True
+
+        timer = self.generic_timer
+        if key == (0b11, 0b011, 0b1110, 0b0000, 0b000):      # CNTFRQ_EL0
+            timer.frequency = value & 0xFFFFFFFF
+            return True
+        if key in ((0b11, 0b011, 0b1110, 0b0000, 0b001),
+                   (0b11, 0b011, 0b1110, 0b0000, 0b010)):    # CNTPCT / CNTVCT
+            return True                                      # read-only
+        if key == (0b11, 0b011, 0b1110, 0b0010, 0b000):      # CNTP_TVAL_EL0
+            timer.tval = value
+            return True
+        if key == (0b11, 0b011, 0b1110, 0b0010, 0b001):      # CNTP_CTL_EL0
+            timer.ctl = value
+            return True
+        if key == (0b11, 0b011, 0b1110, 0b0010, 0b010):      # CNTP_CVAL_EL0
+            timer.compare = value & 0xFFFFFFFFFFFFFFFF
             return True
 
         bank = self.BANKED_REGISTERS.get(key)
