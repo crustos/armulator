@@ -12,12 +12,14 @@ from armulator.peripherals.serial_bus import (
 )
 from armulator.peripherals.spi_slave import Bcm2835SpiSlave, address_octet
 from armulator.peripherals.spi_tegra import Tegra210Spi
+from armulator.peripherals.uart_8250 import TegraUart, Uart8250
 from armulator.peripherals.uart_pl011 import BcmSystemTimer, Pl011Uart
 
 __all__ = [
     'MMIODevice', 'UnimplementedDevice', 'Access',
     'BcmGpio', 'GpioFunction', 'Pull', 'TegraGpio',
     'Pl011Uart', 'BcmSystemTimer', 'Gic400',
+    'Uart8250', 'TegraUart',
     'Bcm2835Spi', 'Bcm2835I2c', 'SpiSlaveDevice', 'SpiLoopback',
     'I2cSlaveDevice', 'Bcm2835SpiSlave', 'address_octet',
     'Tegra210Spi',
