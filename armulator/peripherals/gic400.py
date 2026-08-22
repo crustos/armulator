@@ -66,6 +66,61 @@ GICC_HPPIR = GICC_BASE + 0x18
 GICC_IIDR = GICC_BASE + 0xFC
 
 
+class BankedInterruptState:
+    """
+    Per-interrupt state, banked per core for the interrupts that are private.
+
+    Interrupt IDs below :data:`SPI_BASE` -- the 16 SGIs and the 16 PPIs -- are
+    architecturally *banked*: each core has its own copy, and every core sees
+    interrupt 30 as its own timer. SPIs above that are genuinely shared, since
+    one device drives one line the distributor then routes.
+
+    Modelling all of them as one flat array made a cluster's four timers look
+    like one, so whichever core's timer fired last determined what every core
+    saw. Indexing without a core reads the bank of whichever core the
+    scheduler last selected (``gic.current_cpu``), which keeps single-core use
+    and existing callers working unchanged; :meth:`get` and :meth:`set` name a
+    core explicitly, which is what the routing logic needs.
+    """
+
+    def __init__(self, gic, num_interrupts, num_cpus, initial=False):
+        self._gic = gic
+        self._shared = [initial] * num_interrupts
+        self._banked = [[initial] * SPI_BASE for _ in range(num_cpus)]
+
+    def get(self, intid: int, cpu=None):
+        if intid < SPI_BASE:
+            if cpu is None:
+                cpu = self._gic.current_cpu
+            return self._banked[cpu][intid]
+        return self._shared[intid]
+
+    def set(self, intid: int, value, cpu=None) -> None:
+        if intid < SPI_BASE:
+            if cpu is None:
+                cpu = self._gic.current_cpu
+            self._banked[cpu][intid] = value
+        else:
+            self._shared[intid] = value
+
+    def set_all_cpus(self, intid: int, value) -> None:
+        """Drive every core's copy, for state that is not really per-core."""
+        if intid >= SPI_BASE:
+            self._shared[intid] = value
+            return
+        for bank in self._banked:
+            bank[intid] = value
+
+    def __getitem__(self, intid):
+        return self.get(intid)
+
+    def __setitem__(self, intid, value):
+        self.set(intid, value)
+
+    def __len__(self):
+        return len(self._shared)
+
+
 class Gic400(MMIODevice):
     """
     :param num_interrupts: highest interrupt ID modelled (default 256)
@@ -83,9 +138,13 @@ class Gic400(MMIODevice):
         self.num_interrupts = num_interrupts
         self.num_cpus = num_cpus
 
-        self.enabled = [False] * num_interrupts
-        self.pending = [False] * num_interrupts
-        self.active = [False] * num_interrupts
+        # current_cpu must exist before the banked arrays, which consult it.
+        self.current_cpu = 0
+        # Banked below SPI_BASE: each core has its own SGIs and PPIs, so a
+        # cluster's four timers are four independent interrupt 30s.
+        self.enabled = BankedInterruptState(self, num_interrupts, num_cpus)
+        self.pending = BankedInterruptState(self, num_interrupts, num_cpus)
+        self.active = BankedInterruptState(self, num_interrupts, num_cpus)
         self.priority = [0xA0] * num_interrupts    # GICv2 reset: mid priority
         self.targets = [0x01] * num_interrupts     # default to CPU 0
         self.config = [0] * num_interrupts         # 0 = level, 1 = edge
@@ -97,11 +156,11 @@ class Gic400(MMIODevice):
         # before stepping a core and accesses land in that core's bank.
         self.cpu_interface_enabled_per_cpu = [False] * num_cpus
         self.priority_mask_per_cpu = [0xFF] * num_cpus
-        self.current_cpu = 0
         self.binary_point = 0
 
         #: Raw input line level per interrupt ID, before enable/priority.
-        self.lines = [False] * num_interrupts
+        #: Banked below SPI_BASE, so each core drives its own PPIs.
+        self.lines = BankedInterruptState(self, num_interrupts, num_cpus)
         #: Device name per interrupt ID, for readable traces.
         self.sources = {}
         #: Outstanding target mask per SGI, so an IPI can be delivered to several cores.
@@ -132,7 +191,7 @@ class Gic400(MMIODevice):
             if cpu is None:
                 return bool(self.sgi_active[intid])
             return bool(self.sgi_active[intid] & (1 << cpu))
-        return self.active[intid]
+        return self.active.get(intid, cpu)
 
     def targets_cpu(self, intid: int, cpu: int) -> bool:
         """
@@ -172,25 +231,29 @@ class Gic400(MMIODevice):
         for intid, (_, device) in self.sources.items():
             self.set_line(intid, device.irq_pending)
 
-    def set_line(self, intid: int, level: bool) -> None:
+    def set_line(self, intid: int, level: bool, cpu=None) -> None:
         """
         Drive interrupt ``intid``'s input line.
 
         Edge-triggered interrupts latch pending on the rising edge; level
         triggered ones track the line, so a device that keeps asserting
         stays pending until firmware clears the source.
+
+        ``cpu`` names which core's bank to drive for the banked interrupts
+        below :data:`SPI_BASE`; it is ignored for SPIs, which are shared. A
+        cluster's per-core timers each drive their own copy of PPI 30.
         """
         level = bool(level)
-        previous = self.lines[intid]
-        self.lines[intid] = level
+        previous = self.lines.get(intid, cpu)
+        self.lines.set(intid, level, cpu)
         if self.config[intid]:                     # edge triggered
             if level and not previous:
-                self.pending[intid] = True
+                self.pending.set(intid, True, cpu)
         else:
             # Level triggered: pending simply tracks the input line.  Active
             # and pending are independent states in GICv2, so a line going
             # low clears pending even while the interrupt is being serviced.
-            self.pending[intid] = level
+            self.pending.set(intid, level, cpu)
         self._update_output()
 
     # ------------------------------------------------------------------
@@ -202,9 +265,11 @@ class Gic400(MMIODevice):
 
         With ``cpu`` given, only interrupts routed to that core are considered.
         """
+        # Read the banked state for the core being asked about, not for
+        # whichever core the scheduler happens to have selected.
         return [
             i for i in range(self.num_interrupts)
-            if self.pending[i] and self.enabled[i]
+            if self.pending.get(i, cpu) and self.enabled.get(i, cpu)
             and not self._is_active_for(i, cpu)
             and (cpu is None or self.targets_cpu(i, cpu))
         ]
@@ -257,7 +322,9 @@ class Gic400(MMIODevice):
             # This core has taken its copy of the IPI; the interrupt stays pending for
             # any other core that was targeted and has not yet acknowledged.
             self.sgi_targets[intid] &= ~(1 << self.current_cpu)
-            self.pending[intid] = bool(self.sgi_targets[intid])
+            # Only this core's copy is consumed; the others stay pending in
+            # their own banks until each acknowledges.
+            self.pending.set(intid, False, self.current_cpu)
             self._update_output()
             return intid
         self.active[intid] = True
@@ -296,7 +363,11 @@ class Gic400(MMIODevice):
         """
         if not 0 <= sgi_id < 16:
             raise ValueError('SGI id must be 0-15')
-        self.pending[sgi_id] = True
+        # An SGI is pending in each targeted core's own bank, not in the
+        # sending core's: that is what makes a broadcast reach every target.
+        for cpu in range(self.num_cpus):
+            if target_cpus & (1 << cpu):
+                self.pending.set(sgi_id, True, cpu)
         self.targets[sgi_id] = target_cpus
         #: Which cores still owe an acknowledgement for this SGI.
         self.sgi_targets[sgi_id] = target_cpus
