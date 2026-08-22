@@ -19,10 +19,18 @@ Cortex-A57 (ARMv8-A), and that is now modelled: `JetsonNanoA64` gives one A57,
 `JetsonNanoA64Smp` the full four-core cluster. `JetsonNano` remains the ARMv6
 board, and remains the default. See [choosing a core](#choosing-a-core) below.
 
+**Bare-metal images do boot.** A freestanding AArch64 image that uses only the
+CPU, the MMU, the GIC, the generic timer and the console runs here end to end.
+That is a real workload, not a toy: an external project's bare-metal kernel
+boots to completion on this board — exception-level descent, `.bss` clear, MMU
+tables built and translating, a deliberate fault taken and returned from, and
+timer interrupts at 100 Hz with none spurious.
+
 **The vendor kernel still will not boot.** Modelling the CPU is not the same as
-modelling the SoC. Four peripherals out of the T210's several dozen are present
-— no memory controller, no clock and reset controller, no power management, no
-display, no USB. A kernel gets nowhere without them.
+modelling the SoC. A handful of the T210's several dozen peripherals are
+present — no memory controller, no clock and reset controller, no power
+management, no display, no USB. A Linux kernel gets nowhere without them, and
+that is not going to change.
 
 **The boot chain is out of scope and will stay that way.** The Tegra X1
 boots through a signed chain — boot ROM, then CBoot — that is proprietary
@@ -41,9 +49,21 @@ GPU, this project has nothing for you.
 | Device | Attribute | Address | Fidelity |
 |---|---|---|---|
 | Tegra GPIO | `board.gpio` | `0x6000D000` | **Real model** |
-| UART A | `board.uart` | `0x70006000` | PL011 model, close enough |
+| UART A | `board.uart` | `0x70006000` | **Real model** — 16550, 4-byte spacing |
 | SPI1 | `board.spi` | `0x7000D400` | **Real model** |
-| GIC-500 | `board.gic` | `0x50041000` | GICv2-compatible |
+| GIC-500 | `board.gic` | `0x50041000` (GICD) | GICv2-compatible |
+| Generic timer | `cpu.registers.generic_timer` | system registers | EL1 physical timer, PPI 30 |
+
+The UART **was** a PL011 standing in for the 16550, and that was not "close
+enough": the two share offset 0 for the data register and disagree about
+everything after it. A driver would write its first byte successfully and then
+hang forever, because it polls `LSR.THRE` at offset `0x14` — which a PL011
+answers with zero. See [the console section](#uart-a-is-a-16550-not-a-pl011).
+
+The GIC base is `0x50040000`. The `0x50041000` above is the **distributor**,
+which is where the TRM and the device tree point; the GIC-400 block puts GICD
+at +0x1000 and GICC at +0x2000 from the base. `board.GICD_ADDRESS` and
+`board.GICC_ADDRESS` give the two directly.
 
 ```python
 from armulator.boards import JetsonNano
@@ -350,14 +370,81 @@ real model. See [RASPI.md](RASPI.md).
 - Memory controller
 - Everything GPU-related
 
+### UART A is a 16550, not a PL011
+
+The Tegra X1's debug console is an NS16550 with its registers spaced **four
+bytes** apart, modelled by `armulator.peripherals.uart_8250.TegraUart`. It is
+not a variant of the PL011 the Pi boards use — they are unrelated designs:
+
+| | PL011 | 16550 / Tegra |
+|---|---|---|
+| data register | `DR` at `0x00` | `THR` at `0x00` |
+| "ready to write?" | `FR.TXFF` **set** when full | `LSR.THRE` **set** when empty |
+| baud rate | `IBRD`/`FBRD` | `DLL`/`DLM`, behind `LCR.DLAB` |
+| register spacing | 4 bytes | 1 byte architecturally; Tegra uses 4 |
+
+Both traps are modelled rather than smoothed over. A driver that inverts the
+`THRE` poll hangs here, and one that uses the unshifted offsets scribbles
+`LCR` writes onto `IIR`/`FCR` and configures the port at random — with no
+error, because every address in the range decodes to *some* real register.
+Reproducing the failure in the emulator is the point.
+
+```python
+from armulator.boards import JetsonNano
+
+board = JetsonNano()
+board.uart.feed('typed input')     # into the receive FIFO
+print(board.uart.text)             # everything transmitted
+print(board.uart.divisor)          # what the driver programmed
+print(board.uart.baud(408_000_000))
+```
+
+`Uart8250(shift=0)` gives the byte-spaced layout for a plain ISA 16550.
+
+An independent cross-check: an external bare-metal driver written from the TRM
+programs divisor `0xDD` for 115200 baud off Tegra's 408 MHz UART clock, and
+this model reports exactly that — two readings of the documentation agreeing,
+which is not proof but is better than one.
+
+### The architected generic timer
+
+`armulator.armv8.generic_timer.GenericTimer` models the EL1 physical timer:
+`CNTPCT_EL0`, `CNTP_CTL_EL0`, `CNTP_TVAL_EL0`, `CNTP_CVAL_EL0`, with
+`CNTFRQ_EL0` at the Jetson's 19.2 MHz. It is part of the core, not a
+peripheral, which is why bare-metal code gets a periodic tick from it without
+touching the SoC.
+
+The counter is **virtual**: it advances as instructions retire rather than by
+wall clock, so runs are deterministic and a firmware delay loop terminates in
+a bounded number of steps. `ticks_per_instruction` sets the ratio — the
+default trades fidelity for tests that finish, since a 1:1 ratio would make a
+one-millisecond busy-wait take millions of emulated instructions.
+
+`ISTATUS` is recomputed from the counter rather than stored, so it becomes true
+the moment `CNTPCT >= CVAL` whether or not anyone reads it, and writing it has
+no effect. The output arrives as **PPI 30**, sampled into the distributor by
+`Board.sample_timer()` on every step.
+
+One approximation: this model keeps one line per interrupt ID rather than one
+per core, so on a cluster the primary core's timer drives the PPI. A real PPI
+is private to each core.
+
 ### GIC-500 and multi-core interrupts
 
 Modelled with the `Gic400` class. GIC-500 is GICv2-compatible at the
 register level for the distributor and CPU interface, which is the part
 that matters here. GICv3 features (affinity routing, ITS, system register
-access) are not modelled. The SPI numbers wired up
-(`GPIO_SPI`, `UART_SPI`, `SPI_SPI`) are placeholders rather than verified
-Tegra X1 interrupt assignments.
+access) are not modelled.
+
+`UART_SPI = 36` — interrupt ID 68 — matches the Tegra X1 assignment and is
+cross-checked against an independent driver (see below). `GPIO_SPI` and
+`SPI_SPI` remain placeholders rather than verified assignments.
+
+The base address was wrong until recently: it was set to `0x50041000`, the
+distributor address, being used as the GIC *base*. That displaced every GIC
+register by `0x1000`, and because unmapped offsets read back as zero rather
+than faulting, the symptom was simply that the distributor never enabled and
+no interrupt was ever delivered.
 
 On `JetsonNanoA64Smp` the CPU interface registers (`GICC_CTLR`, `GICC_PMR`) are
 banked per core, so each core enables its own interface. Peripheral interrupts

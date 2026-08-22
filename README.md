@@ -144,7 +144,14 @@ print(board.format_trace())     # gpio.GPFSEL1 <- 0x00200000 ...
 
 Available boards: `RaspberryPi3` (BCM2837, peripherals at `0x3F000000`),
 `RaspberryPi4` (BCM2711, `0xFE000000`) and `JetsonNano` (Tegra X1, GPIO at
-`0x6000D000`).
+`0x6000D000`). Each has an `A64` variant built around the AArch64 core —
+`RaspberryPi3A64`, `RaspberryPi4A64`, `JetsonNanoA64` — and
+`JetsonNanoA64Smp` for the full four-core Cortex-A57 cluster.
+
+Consoles differ by board: the Pis use a PL011 (`Pl011Uart`), the Jetson a
+16550 with Tegra's 4-byte register spacing (`TegraUart`). They are unrelated
+designs, not variants, and `board.uart` gives whichever is right — see
+[JETSON.md](JETSON.md).
 
 Peripherals expose a pin-level API so tests can act as the outside world:
 
@@ -197,6 +204,15 @@ gic.write_register(GICC_EOIR, intid)      # end of interrupt
 Priority, edge/level configuration and the acknowledge/EOI handshake are all
 modelled, including the case that catches real drivers out: a level-triggered
 source that is still asserting at EOI immediately re-presents.
+
+On the AArch64 core each core also has the architected generic timer, which is
+how bare-metal code gets a periodic tick without touching an SoC peripheral. It
+arrives as PPI 30 and its counter advances as instructions retire, so delay
+loops terminate deterministically:
+
+```python
+timer = board.cpu.registers.generic_timer   # CNTPCT / CNTP_CTL / CNTP_TVAL
+```
 
 The Pi 3 has no GIC (the BCM2837 uses the legacy controller), so it falls
 back to polling device lines directly.
