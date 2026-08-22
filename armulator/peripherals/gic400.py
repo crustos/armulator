@@ -92,14 +92,64 @@ class Gic400(MMIODevice):
         self.group = [0] * num_interrupts
 
         self.distributor_enabled = False
-        self.cpu_interface_enabled = False
-        self.priority_mask = 0xFF                  # 0xFF = allow everything
+        # The CPU interface registers are banked per core on real hardware. An MMIO
+        # access carries no requester identity, so the scheduler sets `current_cpu`
+        # before stepping a core and accesses land in that core's bank.
+        self.cpu_interface_enabled_per_cpu = [False] * num_cpus
+        self.priority_mask_per_cpu = [0xFF] * num_cpus
+        self.current_cpu = 0
         self.binary_point = 0
 
         #: Raw input line level per interrupt ID, before enable/priority.
         self.lines = [False] * num_interrupts
         #: Device name per interrupt ID, for readable traces.
         self.sources = {}
+        #: Outstanding target mask per SGI, so an IPI can be delivered to several cores.
+        self.sgi_targets = [0] * 16
+        #: Active mask per SGI. The active state is banked per CPU interface for the
+        #: banked interrupts, so one core servicing an IPI must not hide it from another.
+        self.sgi_active = [0] * 16
+
+    @property
+    def cpu_interface_enabled(self):
+        return self.cpu_interface_enabled_per_cpu[self.current_cpu]
+
+    @cpu_interface_enabled.setter
+    def cpu_interface_enabled(self, value):
+        self.cpu_interface_enabled_per_cpu[self.current_cpu] = bool(value)
+
+    @property
+    def priority_mask(self):
+        return self.priority_mask_per_cpu[self.current_cpu]
+
+    @priority_mask.setter
+    def priority_mask(self, value):
+        self.priority_mask_per_cpu[self.current_cpu] = value
+
+    def _is_active_for(self, intid: int, cpu) -> bool:
+        """Whether ``intid`` is already being serviced by ``cpu``."""
+        if intid < 16:
+            if cpu is None:
+                return bool(self.sgi_active[intid])
+            return bool(self.sgi_active[intid] & (1 << cpu))
+        return self.active[intid]
+
+    def targets_cpu(self, intid: int, cpu: int) -> bool:
+        """
+        Whether ``intid`` is routed to ``cpu``.
+
+        SGIs and the other banked interrupts below SPI_BASE are private to each core, so
+        they are always considered targeted; SPIs consult the target byte the distributor
+        holds for them.
+        """
+        if intid < 16:
+            # An SGI is delivered to each targeted core separately, so it stays routed
+            # to a core until that core has acknowledged it.
+            return bool(self.sgi_targets[intid] & (1 << cpu))
+        if intid < SPI_BASE:
+            # PPIs are private to each core and always considered targeted.
+            return True
+        return bool(self.targets[intid] & (1 << cpu))
 
     # ------------------------------------------------------------------
     # Wiring
@@ -146,36 +196,49 @@ class Gic400(MMIODevice):
     # ------------------------------------------------------------------
     # Prioritisation
     # ------------------------------------------------------------------
-    def _candidates(self):
-        """Interrupt IDs that are pending, enabled and not already active."""
+    def _candidates(self, cpu=None):
+        """
+        Interrupt IDs that are pending, enabled and not already active.
+
+        With ``cpu`` given, only interrupts routed to that core are considered.
+        """
         return [
             i for i in range(self.num_interrupts)
-            if self.pending[i] and self.enabled[i] and not self.active[i]
+            if self.pending[i] and self.enabled[i]
+            and not self._is_active_for(i, cpu)
+            and (cpu is None or self.targets_cpu(i, cpu))
         ]
 
-    def highest_priority_pending(self):
+    def highest_priority_pending(self, cpu=None):
         """
-        The pending interrupt that would be acknowledged next, or ``None``.
+        The pending interrupt that ``cpu`` would acknowledge next, or ``None``.
 
         Lower priority *values* win; ties break toward the lower ID, which
-        is what the architecture specifies.
+        is what the architecture specifies. ``cpu`` defaults to the core the
+        scheduler last selected.
         """
         if not self.distributor_enabled:
             return None
-        candidates = self._candidates()
+        if cpu is None:
+            cpu = self.current_cpu
+        candidates = self._candidates(cpu)
         if not candidates:
             return None
         best = min(candidates, key=lambda i: (self.priority[i], i))
         # GICC_PMR masks anything at or below the programmed priority.
-        if self.priority[best] >= self.priority_mask:
+        if self.priority[best] >= self.priority_mask_per_cpu[cpu]:
             return None
         return best
 
+    def irq_pending_for(self, cpu: int) -> bool:
+        """Whether the CPU interface is currently signalling an IRQ to ``cpu``."""
+        return (self.cpu_interface_enabled_per_cpu[cpu]
+                and self.highest_priority_pending(cpu) is not None)
+
     def _update_output(self):
-        self.set_irq(
-            self.cpu_interface_enabled
-            and self.highest_priority_pending() is not None
-        )
+        # `irq_pending` is the line as seen by the core the scheduler has selected.
+        # Multi-core boards ask `irq_pending_for` per core instead.
+        self.set_irq(self.irq_pending_for(self.current_cpu))
 
     # ------------------------------------------------------------------
     # Acknowledge / end-of-interrupt
@@ -186,9 +249,17 @@ class Gic400(MMIODevice):
 
         Returns its ID, or :data:`SPURIOUS_ID` if nothing is pending.
         """
-        intid = self.highest_priority_pending()
+        intid = self.highest_priority_pending(self.current_cpu)
         if intid is None:
             return SPURIOUS_ID
+        if intid < 16:
+            self.sgi_active[intid] |= 1 << self.current_cpu
+            # This core has taken its copy of the IPI; the interrupt stays pending for
+            # any other core that was targeted and has not yet acknowledged.
+            self.sgi_targets[intid] &= ~(1 << self.current_cpu)
+            self.pending[intid] = bool(self.sgi_targets[intid])
+            self._update_output()
+            return intid
         self.active[intid] = True
         if self.config[intid]:
             # Edge triggered: the latch is consumed by acknowledging.
@@ -205,6 +276,10 @@ class Gic400(MMIODevice):
         intid &= 0x3FF
         if intid >= self.num_interrupts:
             return
+        if intid < 16:
+            self.sgi_active[intid] &= ~(1 << self.current_cpu)
+            self._update_output()
+            return
         self.active[intid] = False
         # A level-triggered source still asserting goes straight back to
         # pending -- the reason a handler must clear the device first.
@@ -215,11 +290,16 @@ class Gic400(MMIODevice):
         self._update_output()
 
     def send_sgi(self, sgi_id: int, target_cpus: int = 0x01) -> None:
-        """Raise a software generated interrupt (ID 0-15)."""
+        """
+        Raise a software generated interrupt (ID 0-15) - the inter-processor interrupt
+        one core uses to poke another.
+        """
         if not 0 <= sgi_id < 16:
             raise ValueError('SGI id must be 0-15')
         self.pending[sgi_id] = True
         self.targets[sgi_id] = target_cpus
+        #: Which cores still owe an acknowledgement for this SGI.
+        self.sgi_targets[sgi_id] = target_cpus
         self._update_output()
 
     # ------------------------------------------------------------------
