@@ -250,7 +250,10 @@ class TestInterProcessorInterrupts:
             gic.current_cpu = cpu_id
             gic.write_register(GICC_CTLR, 1)
             gic.write_register(GICC_PMR, 0xFF)
-        gic.write_register(GICD_ISENABLER, 1 << 3)
+            # GICD_ISENABLER0 covers the SGIs and PPIs, which are banked per
+            # core, so each core enables its own copy. Doing this once outside
+            # the loop only enabled it for whichever core was selected last.
+            gic.write_register(GICD_ISENABLER, 1 << 3)
         for core in cluster.cores:
             core.registers.vbar[EL.EL1] = self.VBAR
         return cluster, gic
