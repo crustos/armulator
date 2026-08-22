@@ -214,6 +214,30 @@ loops terminate deterministically:
 timer = board.cpu.registers.generic_timer   # CNTPCT / CNTP_CTL / CNTP_TVAL
 ```
 
+Its rate comes from the board, not from the architecture: `TIMER_FREQUENCY` is
+19.2 MHz on the Jetson and the Pi 3 and 54 MHz on the Pi 4. On a cluster each
+core has its own timer and its own copy of PPI 30, because interrupt IDs below
+32 are banked per core the way the architecture specifies.
+
+### Accesses that hit nothing
+
+On the AArch64 boards, an access to an address no device claims raises a
+synchronous external abort rather than reading back zero, which is what a real
+bus does:
+
+```python
+board.cpu.translate_address(0xDEAD0000, is_write=True, size=4)
+# DataAbortException: external abort: no device at 0xDEAD0000   (status 0b010000)
+```
+
+Reading zero is convenient and hides firmware that walks off its own map --
+the bug then only appears on hardware. This applies with the MMU off, where
+the virtual address is the physical one; with translation on, an address
+outside the page tables already faults as a translation fault, which is the
+more specific report. Set `FAULT_ON_UNMAPPED = False` on a board, or
+`cpu.mem.fault_on_unmapped = False`, to get the permissive behaviour back. The
+ARMv6 boards leave it off.
+
 The Pi 3 has no GIC (the BCM2837 uses the legacy controller), so it falls
 back to polling device lines directly.
 

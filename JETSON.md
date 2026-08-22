@@ -425,9 +425,17 @@ the moment `CNTPCT >= CVAL` whether or not anyone reads it, and writing it has
 no effect. The output arrives as **PPI 30**, sampled into the distributor by
 `Board.sample_timer()` on every step.
 
-One approximation: this model keeps one line per interrupt ID rather than one
-per core, so on a cluster the primary core's timer drives the PPI. A real PPI
-is private to each core.
+PPI 30 is banked, so a four-core cluster has four independent timers driving
+four independent interrupt 30s -- arming one core's timer leaves the other
+three low. Interrupt IDs below `SPI_BASE` (the 16 SGIs and 16 PPIs) all work
+this way; SPIs above them are shared, since one device drives one line the
+distributor then routes.
+
+`CNTFRQ_EL0` is a board property rather than an architectural constant, so it
+comes from `Board.TIMER_FREQUENCY`: 19.2 MHz on the Jetson and the Pi 3,
+54 MHz on the Pi 4. Firmware derives its tick period from this register, so a
+wrong value scales every delay by that ratio with nothing reporting an
+error.
 
 ### GIC-500 and multi-core interrupts
 
