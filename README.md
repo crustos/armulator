@@ -201,6 +201,30 @@ source that is still asserting at EOI immediately re-presents.
 The Pi 3 has no GIC (the BCM2837 uses the legacy controller), so it falls
 back to polling device lines directly.
 
+## Motor control
+
+`armulator.peripherals` models a motor HAT end to end — a PCA9685 PWM controller
+on I2C, driving H-bridges, driving DC motors or steppers:
+
+```python
+from armulator.boards import RaspberryPi4
+from armulator.peripherals import MotorHat
+
+board = RaspberryPi4()
+hat = MotorHat().attach_to(board)      # PCA9685 on the Pi's I2C bus at 0x60
+motor = hat.attach_dc_motor(1)
+
+# ... firmware runs and programs the controller ...
+
+hat.advance(1.0)                       # one second of shaft time
+assert motor.position > 0
+```
+
+Because the layers are separate, a test asserts on where the shaft ended up
+rather than on the register writes that were meant to move it. The full
+walkthrough, including the three PCA9685 behaviours that silently defeat a
+plausible-looking driver, is in [MOTOR.md](MOTOR.md).
+
 ## Serial buses
 
 `Bcm2835Spi` and `Bcm2835I2c` are available on all boards as `board.spi` and
@@ -366,6 +390,9 @@ not hardware validation. Regenerate with `python3 tools/record_baselines.py`.
 - **[JETSON.md](JETSON.md)** — Tegra GPIO structure and masked registers,
   the Tegra SPI controller's triggered-transfer model and its two
   off-by-one register traps, plus an explicit list of what is missing.
+- **[MOTOR.md](MOTOR.md)** — driving motors: a PCA9685 on I2C feeding H-bridges
+  feeding DC motors and steppers, so a test can assert on shaft position rather
+  than on register writes.
 - **[AARCH64.md](AARCH64.md)** — the AArch64 core: instruction coverage,
   exception levels and routing, two-stage translation, the multi-core cluster
   and PSCI bring-up, and the memory model that makes a missing barrier
