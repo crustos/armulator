@@ -32,10 +32,32 @@ class MemoryController:
 class MemoryControllerHub:
     """
     Provides the CPU and memory and input/output devices to interact
+
+    By default an access to an address no controller claims reads as zero and
+    a write to one is discarded. That is convenient but it is not what
+    hardware does: a real bus has nothing to answer, and the access comes back
+    as an external abort. Firmware that walks off the end of its map therefore
+    appears to work here and faults on the board.
+
+    Setting :attr:`fault_on_unmapped` makes unclaimed accesses detectable, so
+    the CPU model can raise the abort instead. It is off by default because
+    the ARMv6 model and its tests rely on the permissive behaviour.
     """
 
     def __init__(self):
         self.memories = []
+        #: When true, callers should treat an unclaimed access as an external
+        #: abort rather than reading zero. See :meth:`is_mapped`.
+        self.fault_on_unmapped = False
+
+    def is_mapped(self, address, size=1) -> bool:
+        """True when the whole access is claimed by one controller.
+
+        An access straddling the end of a region is not mapped: the far half
+        would silently read zero, which is the failure this exists to catch.
+        """
+        mc = self.get_memory_by_address(address)
+        return mc is not None and address + size <= mc.end
 
     @staticmethod
     def from_memory_list(memory_list):
