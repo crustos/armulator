@@ -33,11 +33,13 @@ from armulator.armv6.memory_controller_hub import MemoryController
 from armulator.armv6.memory_types import RAM
 from armulator.boards.cpu import make_adapter
 from armulator.peripherals.gpio_bcm import BcmGpio
+from armulator.armv8.generic_timer import TIMER_PPI
 from armulator.peripherals.gic400 import SPI_BASE, Gic400
 from armulator.peripherals.gpio_tegra import TegraGpio
 from armulator.peripherals.serial_bus import Bcm2835I2c, Bcm2835Spi
 from armulator.peripherals.spi_slave import Bcm2835SpiSlave
 from armulator.peripherals.spi_tegra import Tegra210Spi
+from armulator.peripherals.uart_8250 import TegraUart
 from armulator.peripherals.uart_pl011 import BcmSystemTimer, Pl011Uart
 
 
@@ -234,6 +236,21 @@ class Board:
     # ------------------------------------------------------------------
     # Interrupts
     # ------------------------------------------------------------------
+    def sample_timer(self) -> None:
+        """
+        Drive the EL1 physical timer's PPI from the core's own timer.
+
+        The generic timer is part of the core rather than a peripheral, so it
+        is not in :attr:`devices` and ``Gic400.refresh`` does not see it. It
+        arrives as PPI 30, which is private to a core -- this model keeps one
+        line per interrupt ID rather than one per core, so on a cluster the
+        primary's timer drives it. The ARMv6 core has no architected timer and
+        is skipped.
+        """
+        timer = getattr(self.cpu.registers, 'generic_timer', None)
+        if timer is not None:
+            self.gic.set_line(TIMER_PPI, timer.irq_pending)
+
     def pending_irq(self):
         """Names of devices currently asserting their IRQ line."""
         return [n for n, d in self.devices.items()
@@ -250,6 +267,7 @@ class Board:
         without a GIC fall back to polling device lines directly.
         """
         if self.gic is not None:
+            self.sample_timer()
             self.gic.refresh()
             asserting = self.gic.irq_pending
         else:
@@ -350,8 +368,11 @@ class JetsonNano(Board):
     NVIDIA Jetson Nano (Tegra X1 / T210).  GPIO controller at 0x6000D000.
 
     Real core is Cortex-A57 (ARMv8-A); see the scope note in this module.
-    Only the GPIO block and a debug UART are modelled -- the Tegra boot ROM
-    and CBoot chain are proprietary and out of scope.
+    Only the GPIO block, SPI1, the GIC and the debug UART are modelled -- the
+    Tegra boot ROM and CBoot chain are proprietary and out of scope.
+
+    The console is UART-A, a 16550 with 4-byte register spacing
+    (:class:`~armulator.peripherals.uart_8250.TegraUart`), not a PL011.
     """
 
     PERIPHERAL_BASE = 0x60000000
@@ -362,8 +383,16 @@ class JetsonNano(Board):
     UARTA_ADDRESS = 0x70006000
     SPI_ADDRESS = 0x7000D400
 
-    #: Tegra X1's GIC-500 distributor base.  GICv2-compatible registers.
-    GIC_ADDRESS = 0x50041000
+    #: Tegra X1's GIC base.  The GIC-400 block puts its distributor at
+    #: +0x1000 and its CPU interface at +0x2000, so this is 0x50040000 and
+    #: *not* the 0x50041000 the datasheets and device tree quote -- those
+    #: name the distributor.  Getting this wrong shifts every GIC register
+    #: by 0x1000, which reads back as zero rather than faulting: the
+    #: distributor simply never enables and no interrupt is ever delivered.
+    GIC_ADDRESS = 0x50040000
+    #: Distributor and CPU interface, for firmware that wants the addresses.
+    GICD_ADDRESS = 0x50041000
+    GICC_ADDRESS = 0x50042000
 
     GPIO_SPI = 32
     UART_SPI = 36
@@ -371,7 +400,11 @@ class JetsonNano(Board):
 
     def _build(self):
         self.attach('gpio', TegraGpio(name='tegra_gpio'), address=self.GPIO_ADDRESS)
-        self.attach('uart', Pl011Uart(name='uarta'), address=self.UARTA_ADDRESS)
+        # UART-A is a 16550 with 4-byte register spacing, not a PL011. The
+        # two share offset 0 for the data register and disagree about
+        # everything else, so a PL011 here accepts the first character
+        # written and then hangs any driver that polls LSR for THRE.
+        self.attach('uart', TegraUart(name='uarta'), address=self.UARTA_ADDRESS)
         # SPI1 at 0x7000d400, the controller the Jetson's 40-pin header
         # exposes.  Register map follows the in-tree tegra114 driver, which
         # covers T210.  The Jetson still has no modelled SPI *slave*, so
@@ -394,9 +427,9 @@ class JetsonNanoA64(JetsonNano):
     Firmware must be assembled as A64 (see
     :func:`armulator.boards.firmware.firmware_a64`).
 
-    The AArch64 core does not implement loads, stores or branches yet, so this
-    board can be constructed, mapped and inspected, but firmware that touches a
-    peripheral will not run until that lands.
+    Loads, stores and branches against the peripheral map all execute, so A64
+    firmware runs here end to end -- an earlier version of this docstring said
+    otherwise and was left behind by the core's progress.
     """
 
     ARCH = 'armv8'
