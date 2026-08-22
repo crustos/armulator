@@ -314,7 +314,42 @@ class ArmV8:
         descriptor.memattrs.type = MemType.NORMAL
         descriptor.memattrs.shareable = False
         descriptor.memattrs.outershareable = False
+        self._check_physical_address(
+            descriptor.paddress.physicaladdress, size, is_write, is_instruction)
         return descriptor
+
+    def _check_physical_address(self, physical, size, is_write, is_instruction):
+        """
+        Abort on an access no memory controller claims.
+
+        A real bus has nothing to answer for an unmapped address, so the
+        access returns a synchronous external abort (fault status 0b010000)
+        rather than reading zero. Without this a firmware bug that walks off
+        the map is invisible here and only shows up on hardware.
+
+        This is reached only with the MMU off, where the VA is the PA. With
+        translation on, an address outside the tables already faults as a
+        translation fault, which is the more specific and more useful report.
+        An address that *is* mapped by the tables but has no device behind it
+        is deliberately left alone: firmware commonly identity-maps a whole
+        gigabyte of peripheral space, and aborting there would punish it for
+        peripherals this model simply does not implement -- a different thing
+        from the firmware being wrong.
+
+        Opt-in per board via ``mem.fault_on_unmapped``, since the ARMv6 model
+        and its tests rely on the permissive behaviour.
+        """
+        if not getattr(self.mem, 'fault_on_unmapped', False):
+            return
+        if self.mem.is_mapped(physical, size):
+            return
+        if is_instruction:
+            raise InstructionAbortException(
+                physical, 'external abort: no device at 0x%X' % physical,
+                status=0b010000)
+        raise DataAbortException(
+            physical, is_write, 'external abort: no device at 0x%X' % physical,
+            status=0b010000)
 
     def _record_fault_address(self, fault):
         """
