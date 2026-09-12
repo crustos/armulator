@@ -49,6 +49,50 @@ def _pyplot():
     return plt
 
 
+def plot_scan(lidar, ax=None, room=True, max_range=None, **kwargs):
+    """
+    Draw a Lidar's last complete revolution in polar form.
+
+    Polar is the right projection here because it is how the sensor sees the world: each
+    point sits at the bearing it was measured on. A recognisable room shape is also the
+    cheapest correctness check there is -- a scan that is wrong usually looks wrong.
+
+    :param room: also outline the room wall and obstacles, so the scan can be compared
+        against the geometry that produced it
+    :returns: the polar axes drawn on
+    """
+    plt = _pyplot()
+    import numpy as np
+
+    ax = ax or plt.subplots(subplot_kw={'projection': 'polar'})[1]
+
+    angles, ranges = lidar.scan_points()
+    if not angles:
+        raise ValueError(
+            f'{lidar!r} has no complete revolution to plot; spin it for longer'
+        )
+
+    style = {'s': 2, 'alpha': 0.7}
+    style.update(kwargs)
+    ax.scatter(np.radians(angles), ranges, label='returns', **style)
+
+    if room:
+        sweep = np.linspace(0, 2 * np.pi, 361)
+        x, y, _ = lidar.pose
+        # The wall drawn in the sensor's frame, which is what the scan is in. Offset
+        # from the centre makes these two disagree, and seeing them line up anyway is
+        # the point of drawing it.
+        wall = [lidar.room.range_at((x, y), bearing) for bearing in sweep]
+        ax.plot(sweep, wall, color='grey', linewidth=0.8, alpha=0.5, label='geometry')
+
+    ax.set_ylim(0, max_range or lidar.max_range)
+    ax.set_theta_zero_location('E')
+    ax.grid(True, alpha=0.3)
+    ax.set_title(f'{lidar.name}: {len(angles)} returns', fontsize='medium')
+    ax.legend(loc='upper right', fontsize='x-small', bbox_to_anchor=(1.15, 1.1))
+    return ax
+
+
 def _channel_label(telemetry, index):
     load = telemetry.hat.channels[index].load
     position = f'M{index}'

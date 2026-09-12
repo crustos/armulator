@@ -202,6 +202,12 @@ class MotorTelemetry:
 
     def _fields_for(self, index):
         load = self.hat.channels[index].load
+        # A load can declare its own signals, which is how sensors and anything else
+        # added later get recorded without this module having to import them. The two
+        # built-in motor types predate the convention and are matched by type.
+        declared = getattr(load, 'TELEMETRY_FIELDS', None)
+        if declared is not None:
+            return BRIDGE_FIELDS + tuple(declared)
         if isinstance(load, DcMotor):
             return BRIDGE_FIELDS + DC_FIELDS
         if isinstance(load, StepperMotor):
