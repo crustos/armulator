@@ -33,6 +33,9 @@ if __name__ == '__main__':
         keywords='arm emulator',
         packages=PACKAGES,
         license='MIT',
+        # Nothing in the emulator core needs matplotlib; only the telemetry plotting
+        # helpers do, and they import it lazily so this stays optional.
+        extras_require={'plot': ['matplotlib>=3.5']},
         package_data={
             'armulator': ['armv6/arm_configurations.json'],
         },
